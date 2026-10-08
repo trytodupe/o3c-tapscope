@@ -171,41 +171,47 @@ class ReplayWatcher:
     """Detect an exported .osr only once its size and mtime stop changing.
 
     osu! may still be writing when the file first appears, so a single sighting is not
-    enough - the second identical signature is taken as "written".
+    enough - the second identical signature is taken as "written". Several folders can
+    be watched at once (stable's ``Replays`` and lazer's ``exports``).
     """
 
     def __init__(self, directory):
-        self.directory = Path(directory)
+        if isinstance(directory, (str, Path)):
+            directories = [directory]
+        else:
+            directories = list(directory)
+        self.directories = [Path(item) for item in directories]
         self.known = set()
         self.pending = {}
 
+    def _files(self):
+        found = []
+        for directory in self.directories:
+            try:
+                found.extend(directory.glob("*.osr"))
+            except OSError:
+                continue
+        return found
+
     def prime(self):
-        try:
-            files = list(self.directory.glob("*.osr"))
-        except OSError:
-            files = []
-        self.known.update(path.name for path in files)
+        self.known.update(str(path) for path in self._files())
 
     def scan_once(self):
         ready = []
-        try:
-            files = list(self.directory.glob("*.osr"))
-        except OSError:
-            return ready
-        for path in files:
-            if path.name in self.known:
+        for path in self._files():
+            if str(path) in self.known:
                 continue
             try:
                 stat = path.stat()
             except OSError:
                 continue
             signature = (stat.st_size, stat.st_mtime_ns)
-            if self.pending.get(path.name) == signature:
-                self.known.add(path.name)
-                self.pending.pop(path.name, None)
+            if self.pending.get(str(path)) == signature:
+                self.known.add(str(path))
+                self.pending.pop(str(path), None)
                 ready.append(path)
             else:
-                self.pending[path.name] = signature
+                self.pending[str(path)] = signature
         return ready
 
 
@@ -281,7 +287,8 @@ class Studio:
     """Recording sessions, replay handling and the status the page polls."""
 
     def __init__(self, recorder, captures_dir, render, analog_info, tosu_url, state_poll_ms,
-                 default_window_s=DEFAULT_WINDOW_S, store=None, settings=None, settings_path=None):
+                 default_window_s=DEFAULT_WINDOW_S, store=None, settings=None, settings_path=None,
+                 lazer_exports=None):
         self.lock = threading.Lock()
         self.recorder = recorder
         self.captures_dir = Path(captures_dir)
@@ -298,6 +305,7 @@ class Studio:
         self.settings_path = settings_path
         self.watch_status = "watching"
         self.watch_dir = ""
+        self.lazer_exports = lazer_exports
         self.poller = None
 
     def arm(self, window_s=None):
@@ -360,6 +368,13 @@ class Studio:
             "version": (last or {}).get("version", ""),
         }
 
+    def _watch_display(self):
+        """The folder the page labels as watched: stable Replays, else lazer exports."""
+        for folder in (self.watch_dir, self.lazer_exports):
+            if folder and Path(folder).is_dir():
+                return str(folder)
+        return self.watch_dir or ""
+
     def status(self):
         snapshot = self.recorder.snapshot()
         with self.lock:
@@ -375,7 +390,7 @@ class Studio:
             "window_s": self.recorder.window_s,
             "device_error": snapshot["error"],
             "tosu": self._tosu_state(),
-            "watch": {"status": watch_status, "dir": self.watch_dir},
+            "watch": {"status": watch_status, "dir": self._watch_display()},
             "pages": pages,
         }
 
@@ -403,23 +418,64 @@ class Studio:
         return entry
 
     def sources(self):
-        """What the manual "view a replay" picker can offer."""
+        """What the manual "view a replay" picker can offer.
+
+        Both osu!stable's ``Replays`` folder and osu!lazer's ``exports`` folder are
+        listed; each entry remembers which one it came from so a duplicate name still
+        resolves to the picked file.
+        """
         with self.lock:
             current = Path(self.capture_path).name if self.capture_path else ""
+        replays = _file_list(self.watch_dir, "*.osr", "stable")
+        replays += _file_list(self.lazer_exports, "*.osr", "lazer")
+        replays.sort(key=lambda item: item["mtime"], reverse=True)
         return {
             "osu_root": self.settings.get("osu_root", ""),
-            "replays": _file_list(self.watch_dir, "*.osr"),
+            "lazer_root": self.settings.get("lazer_root", ""),
+            "replays": replays,
             "captures": _file_list(self.captures_dir, "*.jsonl"),
             "current_capture": current,
         }
 
-    def view(self, osr_name, capture_name):
+    def _replay_folders(self, source=""):
+        folders = []
+        if source in ("", "stable"):
+            folders.append(self.watch_dir)
+        if source in ("", "lazer"):
+            folders.append(self.lazer_exports)
+        return folders
+
+    def default_replay_dir(self):
+        """Folder the file dialog opens in: stable Replays, then lazer exports."""
+        for folder in (self.watch_dir, self.lazer_exports):
+            if folder and Path(folder).is_dir():
+                return str(folder)
+        return ""
+
+    def _resolve_replay(self, osr, source=""):
+        """An .osr picked in the file dialog (absolute path) or a known folder name.
+
+        The dialog returns an absolute path, which is taken as-is so any folder can be
+        reached; a bare name is still confined to the watched folders, so an untrusted
+        request cannot walk out of them with ``..``.
+        """
+        if osr:
+            candidate = Path(osr)
+            if candidate.is_absolute() and candidate.suffix.lower() == ".osr" and candidate.is_file():
+                return candidate
+        for folder in self._replay_folders(source):
+            found = _contained(folder, osr, ".osr")
+            if found is not None:
+                return found
+        return None
+
+    def view(self, osr_name, capture_name, source=""):
         """Manual path: align a hand-picked replay against a hand-picked capture.
 
         No tosu and no watcher involved - the whole point is that a replay plus a tap
         capture on disk is enough to produce a timeline page.
         """
-        osr_path = _contained(self.watch_dir, osr_name, ".osr")
+        osr_path = self._resolve_replay(osr_name, source)
         if osr_path is None:
             raise ValueError("pick a replay from the list")
         if capture_name:
@@ -477,10 +533,14 @@ class StudioHandler(SimpleHTTPRequestHandler):
             return self.send_json({"ok": True, "restart_required": True, "settings": saved})
         if parsed.path == "/api/pick-folder":
             return self.send_json({"path": pick_directory()})
+        if parsed.path == "/api/pick-file":
+            return self.send_json({"path": pick_file(self.studio.default_replay_dir())})
         if parsed.path == "/api/view":
             payload = self.read_json()
             try:
-                url = self.studio.view(payload.get("osr", ""), payload.get("capture", ""))
+                url = self.studio.view(
+                    payload.get("osr", ""), payload.get("capture", ""), payload.get("source", "")
+                )
             except (Exception, SystemExit) as error:  # SystemExit is a BaseException
                 return self.send_json({"ok": False, "error": str(error)})
             return self.send_json({"ok": True, "url": url})
@@ -530,7 +590,7 @@ class StudioHandler(SimpleHTTPRequestHandler):
             return
 
 
-def _file_list(folder, pattern):
+def _file_list(folder, pattern, source=""):
     """Files directly in ``folder`` matching ``pattern``, newest first."""
     if not folder:
         return []
@@ -539,7 +599,8 @@ def _file_list(folder, pattern):
     except OSError:
         return []
     files.sort(key=lambda path: path.stat().st_mtime, reverse=True)
-    return [{"name": path.name, "mtime": path.stat().st_mtime} for path in files]
+    return [{"name": path.name, "path": str(path.resolve()), "mtime": path.stat().st_mtime,
+             "source": source} for path in files]
 
 
 def _contained(folder, name, suffix):
@@ -550,18 +611,11 @@ def _contained(folder, name, suffix):
     return path if path.is_file() else None
 
 
-def pick_directory():
-    """Absolute folder path chosen in a native Windows dialog, or "" when cancelled.
+def _dialog_output(script):
+    """Run a PowerShell dialog script and return its stdout, or "" on failure.
 
-    A browser cannot hand the server an absolute path, so the local process opens the
-    dialog itself. A child process keeps the HTTP thread free of any GUI requirement.
+    A child process keeps the HTTP thread free of any GUI requirement.
     """
-    script = (
-        "Add-Type -AssemblyName System.Windows.Forms;"
-        "$d = New-Object System.Windows.Forms.FolderBrowserDialog;"
-        "$d.Description = 'Select a folder';"
-        "if ($d.ShowDialog() -eq 'OK') { [Console]::Out.Write($d.SelectedPath) }"
-    )
     try:
         result = subprocess.run(
             ["powershell", "-NoProfile", "-STA", "-Command", script],
@@ -570,6 +624,37 @@ def pick_directory():
     except (OSError, subprocess.SubprocessError):
         return ""
     return result.stdout.strip()
+
+
+def pick_directory():
+    """Absolute folder path chosen in a native Windows dialog, or "" when cancelled.
+
+    A browser cannot hand the server an absolute path, so the local process opens the
+    dialog itself.
+    """
+    script = (
+        "Add-Type -AssemblyName System.Windows.Forms;"
+        "$d = New-Object System.Windows.Forms.FolderBrowserDialog;"
+        "$d.Description = 'Select a folder';"
+        "if ($d.ShowDialog() -eq 'OK') { [Console]::Out.Write($d.SelectedPath) }"
+    )
+    return _dialog_output(script)
+
+
+def pick_file(initial_dir=""):
+    """Absolute ``.osr`` path chosen in a native Windows dialog, or "" when cancelled."""
+    initial = ""
+    if initial_dir:
+        # Single quotes are PowerShell's literal string delimiter; double them.
+        initial = "$d.InitialDirectory = '%s';" % str(initial_dir).replace("'", "''")
+    script = (
+        "Add-Type -AssemblyName System.Windows.Forms;"
+        "$d = New-Object System.Windows.Forms.OpenFileDialog;"
+        "$d.Filter = 'osu! replay (*.osr)|*.osr|All files (*.*)|*.*';"
+        + initial
+        + "if ($d.ShowDialog() -eq 'OK') { [Console]::Out.Write($d.FileName) }"
+    )
+    return _dialog_output(script)
 
 
 def select_device(path=""):
@@ -582,13 +667,14 @@ def select_device(path=""):
     return analog[0] if analog else None
 
 
-def stage_command(songs, out, calibration, osr_path, capture_path, slug):
+def stage_command(songs, lazer_files, out, calibration, osr_path, capture_path, slug):
     """The studio's render callback: one replay to payload.json plus its assets."""
-    if songs is None:
-        raise RuntimeError("set the osu! folder in the studio settings, then restart")
+    if songs is None and lazer_files is None:
+        raise RuntimeError("set the osu! or osu!lazer folder in the studio settings, then restart")
     spec = ReplaySpec(
         replay=osr_path,
         songs=songs,
+        lazer_files=lazer_files,
         capture=capture_path,
         calibration_data=calibration,
     )
@@ -607,6 +693,7 @@ def main():
     parser.add_argument("--settings", type=Path, default=ROOT / "output" / "settings.json",
                         help="where the web-UI settings live")
     parser.add_argument("--osu", type=Path, help="override the osu! folder for this run")
+    parser.add_argument("--lazer", type=Path, help="override the osu!lazer folder for this run")
     parser.add_argument("--port", type=int, help="override the saved port for this run")
     parser.add_argument("--rate-hz", type=float, default=60.0, help="how often the live page updates")
     parser.add_argument("--captures", type=Path, default=ROOT / "output" / "captures")
@@ -627,6 +714,8 @@ def main():
     settings = settings_module.load(args.settings)
     if args.osu is not None:
         settings["osu_root"] = str(args.osu)
+    if args.lazer is not None:
+        settings["lazer_root"] = str(args.lazer)
     calibration = settings_module.calibration_data(settings)
     config = build_config(calibration)
     port = args.port if args.port is not None else settings["port"]
@@ -659,17 +748,20 @@ def main():
     shell_path.write_text(render_page({"base": base, "skin": skin_url}), encoding="utf-8")
 
     songs_dir = settings_module.subdir(settings, "Songs")
+    lazer_files = settings_module.lazer_subdir(settings, "files")
+    lazer_exports = settings_module.lazer_subdir(settings, "exports")
     watch_dir = settings_module.subdir(settings, "Replays") or (ROOT / "output" / "no-replays")
 
     target = select_device(settings["device_path"])
     recorder = StudioRecorder()
     studio = Studio(recorder, args.captures,
                     lambda osr, capture, slug: stage_command(
-                        songs_dir, args.out, calibration, osr, capture, slug),
+                        songs_dir, lazer_files, args.out, calibration, osr, capture, slug),
                     identify(target) if target else {}, tosu_url, args.state_poll_ms,
                     default_window_s=window_seconds(window_min) or 0.0,
                     store=ReplayStore(replays_dir / "replays.json"),
-                    settings=settings, settings_path=args.settings)
+                    settings=settings, settings_path=args.settings,
+                    lazer_exports=lazer_exports)
 
     stop = threading.Event()
     threads = []
@@ -726,10 +818,12 @@ def main():
 
     studio.watch_dir = str(watch_dir)
     watcher = None
+    watch_dirs = [watch_dir] + ([lazer_exports] if lazer_exports else [])
     if args.no_watch:
         studio.watch_status = "watcher off (align a replay from the page)"
     else:
-        watcher = ReplayWatcher(watch_dir)
+        existing = [item for item in watch_dirs if item.is_dir()]
+        watcher = ReplayWatcher(existing or watch_dirs)
         watcher.prime()
     studio.watch_dir = str(watch_dir)
 
@@ -747,11 +841,13 @@ def main():
         )
     url = f"http://127.0.0.1:{port}/"
     print(f"studio     : {url}")
-    print(f"osu        : {settings['osu_root'] or '(not set - edit it in the web UI)'}")
+    print(f"osu        : {settings['osu_root'] or '(none - stable Songs/Replays off)'}")
+    print(f"osu!lazer  : {settings['lazer_root'] or '(none)'}")
     if args.no_watch:
         print(f"replays    : {watch_dir} (watcher off - align from the page)")
     else:
-        print(f"replays    : watching {watch_dir}")
+        watched = ", ".join(str(item) for item in watch_dirs)
+        print(f"replays    : watching {watched}")
     print(f"captures   : {args.captures}")
     if skin_url:
         print(f"skin       : {skin_url}")

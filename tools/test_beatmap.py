@@ -7,6 +7,7 @@ from beatmap import (
     file_hash,
     filename_terms,
     find_beatmap,
+    find_beatmap_in_store,
     hit_windows,
     judgement,
     pair_presses,
@@ -72,6 +73,42 @@ class FindBeatmapTests(unittest.TestCase):
             )
             found = find_beatmap(file_hash(chart), root, terms=terms, max_folders=1)
         self.assertEqual(found, chart)
+
+
+class FindBeatmapInStoreTests(unittest.TestCase):
+    """osu!lazer keeps beatmaps in a flat, content-addressed file store."""
+
+    @staticmethod
+    def _store(root, contents):
+        """Write each blob at files/<sha256[:1]>/<sha256[:2]>/<sha256>, like lazer."""
+        paths = {}
+        for name, text in contents.items():
+            blob = text.encode("utf-8")
+            digest = hashlib.sha256(blob).hexdigest()
+            folder = root / digest[:1] / digest[:2]
+            folder.mkdir(parents=True, exist_ok=True)
+            target = folder / digest
+            target.write_bytes(blob)
+            paths[name] = target
+        return paths
+
+    def test_a_beatmap_blob_is_found_by_md5(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = self._store(root, {"map": BEATMAP, "decoy": "not a beatmap"})
+            found = find_beatmap_in_store(file_hash(paths["map"]), root)
+        self.assertEqual(found, paths["map"])
+
+    def test_a_hash_that_is_not_stored_is_none(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._store(root, {"map": BEATMAP})
+            self.assertIsNone(find_beatmap_in_store("0" * 32, root))
+
+    def test_a_missing_store_is_reported(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(SystemExit):
+                find_beatmap_in_store("0" * 32, Path(directory) / "absent")
 
 
 class ReplayNameTests(unittest.TestCase):

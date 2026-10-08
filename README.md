@@ -4,7 +4,7 @@ SayoDevice O3C 的磁轴深度采集、主机按键同钟录制与 osu! replay �
 
 ## Quick start
 
-需要：Windows、[uv](https://docs.astral.sh/uv/)、osu!stable、可选的 [tosu](https://github.com/Kanawanagasaki/tosu)（装在 `http://127.0.0.1:24050`，给对齐提供粗锚点），以及一台 SayoDevice O3C（**只在录实时深度时需要；单纯看 replay 不需要**）。
+需要：Windows、[uv](https://docs.astral.sh/uv/)、osu!stable **或** osu!lazer（只有 lazer 也能看 replay / 录实时深度，见下）、可选的 [tosu](https://github.com/Kanawanagasaki/tosu)（装在 `http://127.0.0.1:24050`，给对齐提供粗锚点；对 lazer 不一定有效），以及一台 SayoDevice O3C（**只在录实时深度时需要；单纯看 replay 不需要**）。
 
 ```powershell
 git clone <repo> ; cd rapid-trigger
@@ -12,14 +12,14 @@ uv sync
 uv run python tools/studio.py          # 打开 http://127.0.0.1:8770/
 ```
 
-第一次打开后在页面 **settings** 里填 **osu! folder**（如 `D:\osu!`，Songs / Replays / Skins 都从它派生）和每个键的名字与 **RT 区间**（low/high，mm），保存后**重启 studio** 生效。
+第一次打开后在页面 **settings** 里填 **osu! folder**（如 `D:\osu!`，Songs / Replays / Skins 都从它派生）、可选的 **osu!lazer folder**（如 `D:\osulazer`，用于 lazer 的 `exports` / `files`）和每个键的名字与 **RT 区间**（low/high，mm），保存后**重启 studio** 生效。两个 folder 至少填一个；只有 lazer 时填 lazer 即可（`%APPDATA%\osu` 这种默认位置会自动识别）。
 
 之后就两条互不影响的用法：
 
-- **看一局已有的 replay（最常用）**：在 **view a replay** 区块选一个 `.osr`（来自 `<osu!>\Replays`）和一个 capture（默认就是刚结束的那次录制），点 **Align & open** 即打开时间线。这条路径**不需要 tosu、不需要 watcher、也不需要插着 O3C**。
+- **看一局已有的 replay（最常用）**：在 **view a replay** 区块点 **Browse…** 弹出系统文件对话框选一个 `.osr`（默认目录是 stable `Replays`，也可以选 lazer `exports` 里的，或直接粘贴绝对路径），再选一个 capture（默认就是刚结束的那次录制），点 **Align & open** 即打开时间线。这条路径**不需要 tosu、不需要 watcher、也不需要插着 O3C**。
 - **边打边录**：点 **Start capture** 录实时深度；导出的 `.osr` 落进 `<osu!>\Replays` 后 watcher 自动 align 并出现在 **aligned replays**。tosu 开着会用它做对齐的粗锚点，没开则只按按键序列对齐（可用 `--no-tosu` / `--no-watch` 关掉这两个自动行为）。
 
-设置存在 `output/settings.json`（不入库）；`--osu` / `--port` / `--skin` 等命令行参数可临时覆盖。osu!lazer 暂不支持。
+设置存在 `output/settings.json`（不入库）；`--osu` / `--lazer` / `--port` / `--skin` 等命令行参数可临时覆盖。osu!lazer 的 replay 可以查看（见下），但不参与实时采集。
 
 ## 磁轴深度采集（协议已确认）
 
@@ -82,7 +82,7 @@ uv run python tools/plot_depth.py output/session/aligned.jsonl --out depth-align
 
 `--keys` 是手柄两个键的 vk（默认 `90,88`，即 Z / X）；`--tolerance-ms` 是匹配容差；`--level-threshold 6,4,8` 是各键的激活阈值（C 键静息就漂到 1–4，不能全局取同一个值）；`--gap-ms` 是判为双击的「松开 → 再按下」间隔。输出目录含 `aligned.jsonl`（深度 + 主机按键 + replay 边线，可整体交给 `plot_depth.py`）和 `alignment.json`。
 
-支持经典二进制 `.osr` 的 LZMA frame 数据；暂不支持 lazer 的额外格式语义，也不自动处理 DT/HT 的时间比例。
+支持经典二进制 `.osr` 的 LZMA frame 数据，osu!stable 与 osu!lazer 导出的 `.osr` 是同一格式；不自动处理 DT/HT 的时间比例。
 
 ### 手工锚点（旧路径）
 
@@ -126,7 +126,7 @@ uv run python tools/game_state.py --out state.jsonl --duration 60   # 只记录�
 
 ## 采集控制台（studio）
 
-`tools/studio.py` 把「实时深度 + 采集开关 + 手动/自动 replay 对齐 + replay 查看」合成一个常驻进程：浏览器里 Start/Stop 采集；要么在 **view a replay** 里手选 `.osr` + capture 点 **Align & open**，要么让 watcher 在 `<osu!>\Replays` 出现新 `.osr` 时自动对齐。它是**唯一的设备持有者**，所以不要和 `live_depth.py` 同时开；采集只发已确认的只读 `0x14` 帧。页面的 **settings** 就是全部配置（osu! 路径、每键名字/RT、设备、tosu、皮肤、端口、窗口分钟数），改动**重启后生效**。tosu 和 watcher 都只是自动化的锦上添花（`--no-tosu` / `--no-watch` 可关），手动 align 一局完全不依赖它们。
+`tools/studio.py` 把「实时深度 + 采集开关 + 手动/自动 replay 对齐 + replay 查看」合成一个常驻进程：浏览器里 Start/Stop 采集；要么在 **view a replay** 里用文件对话框选 `.osr` + capture 点 **Align & open**，要么让 watcher 在 `<osu!>\Replays` （以及可选的 lazer `exports`）出现新 `.osr` 时自动对齐。它是**唯一的设备持有者**，所以不要和 `live_depth.py` 同时开；采集只发已确认的只读 `0x14` 帧。页面的 **settings** 就是全部配置（osu! / osu!lazer 路径、每键名字/RT、设备、tosu、皮肤、端口、窗口分钟数），改动**重启后生效**。tosu 和 watcher 都只是自动化的锦上添花（`--no-tosu` / `--no-watch` 可关），手动 align 一局完全不依赖它们。
 
 ```powershell
 uv run python tools/game_state.py --probe    # 可选：先确认 tosu 在应答（粗对齐靠它）
@@ -143,6 +143,7 @@ uv run python tools/studio.py                # 打开 http://127.0.0.1:8770/
 | --- | --- | --- |
 | `--settings` | `output/settings.json` | Web UI 保存的设置文件 |
 | `--osu` | settings | 临时覆盖 osu! 目录（派生 Songs / Replays / Skins） |
+| `--lazer` | settings | 临时覆盖 osu!lazer 目录（派生 `exports` / `files`） |
 | `--port` | settings `8770` | 页面/API 端口，只绑 `127.0.0.1` |
 | `--captures` | `output/captures` | session 文件输出目录 |
 | `--out` | `output/replays` | 每局数据根目录（`payload.json` + 资源）；列表清单 `replays.json` 也在这里 |
@@ -153,7 +154,7 @@ uv run python tools/studio.py                # 打开 http://127.0.0.1:8770/
 | `--no-watch` | | 不自动监听新 `.osr`（页面里仍可手动 align 一局） |
 | `--no-tosu` | | 不轮询 tosu，只按按键序列对齐 |
 
-页面还显示实时三条深度条、设备/tosu/监听状态，以及已对齐回放的列表（来自 `output/replays/replays.json`，跨重启保留）。HTTP 接口：`GET /api/status`、`GET /api/pages`、`GET /api/sources`、`GET /api/settings`、`POST /api/settings`、`POST /api/pick-folder`、`POST /api/view`、`POST /api/start?window_min=<分钟>`、`POST /api/stop`、`GET /events`（SSE 实时深度）。静态文件以仓库根为文档根，所以共享 shell 能直接用 `/web/replayviewer/...` 和 `/output/skin/...`。
+页面还显示实时三条深度条、设备/tosu/监听状态，以及已对齐回放的列表（来自 `output/replays/replays.json`，跨重启保留）。HTTP 接口：`GET /api/status`、`GET /api/pages`、`GET /api/sources`、`GET /api/settings`、`POST /api/settings`、`POST /api/pick-folder`、`POST /api/pick-file`、`POST /api/view`、`POST /api/start?window_min=<分钟>`、`POST /api/stop`、`GET /events`（SSE 实时深度）。静态文件以仓库根为文档根，所以共享 shell 能直接用 `/web/replayviewer/...` 和 `/output/skin/...`。
 
 ## 时间线视图（replay + 按键深度）
 
@@ -199,7 +200,17 @@ uv run python tools/replay_view.py "D:\osu!\Replays\play.osr" --capture tap.json
   --out "output/replays/<id>"
 ```
 
-采集与 replay 的时钟差用和 `tools/osu_align.py` 相同的按键序列匹配算出来，`--tolerance-ms` 是匹配容差。一次采集可能跨好几局（菜单、重开都在里面），`replay_view.py` 会用 replay 的谱面 MD5 从 `state` 流里挑出对应的那一局，再把 level / keyboard 裁到那一段；没装读取器时退回整份采集。另外，按住键打串键时 Windows 会发**键盘自动重复**的 down，主机侧的 down 会比 replay 多——对齐器把这类多余的 down 当噪声容忍掉，不代表手柄双击。谱面按 replay 里存的 MD5 在 `--songs`（默认 `D:\osu!\Songs`）下查找：先用文件名里的 artist / title 排序缩小范围，再逐个算哈希；也可以直接 `--beatmap` 指定。
+采集与 replay 的时钟差用和 `tools/osu_align.py` 相同的按键序列匹配算出来，`--tolerance-ms` 是匹配容差。一次采集可能跨好几局（菜单、重开都在里面），`replay_view.py` 会用 replay 的谱面 MD5 从 `state` 流里挑出对应的那一局，再把 level / keyboard 裁到那一段；没装读取器时退回整份采集。另外，按住键打串键时 Windows 会发**键盘自动重复**的 down，主机侧的 down 会比 replay 多——对齐器把这类多余的 down 当噪声容忍掉，不代表手柄双击。谱面按 replay 里存的 MD5 查找：stable 下先用文件名里的 artist / title 排序缩小范围，再在 `--songs`（默认 `D:\osu!\Songs`）里逐个算哈希；stable 查不到时（含 lazer-only 的图）再到 lazer 的 `files` 内容寻址仓库里筛 `.osu` blob 算 MD5（`--lazer` 或 settings 的 lazer folder）。也可以直接 `--beatmap` 指定。
+
+### osu!lazer
+
+lazer 导出的 `.osr` 与 stable 是同一套二进制格式，所以帧、mods、谱面 MD5 都照旧。变的是**文件的存放方式**：lazer 把每一次 import 的文件按内容 SHA-256 存进 `files/<sha256[:1]>/<sha256[:2]>/<sha256>`，既不保留原文件名也没有 `Songs/<set>/` 目录。于是按 MD5 找谱面只能先嗅每个 blob 是不是 `.osu`（首行 `osu file format`），再对命中的算 MD5；这个 MD5 索引在进程内缓存，首次扫描大约几秒，之后即时，miss 时重建以吸收运行中新 import 的图。
+
+用法：settings 里新增 **osu!lazer folder**（填到 `D:\osulazer` 这一层，不是 `files`），重启后 studio 的 **view a replay** 文件对话框默认会从 stable `Replays` 打开，同时也可以选 lazer 的 `exports`（或任何位置的 `.osr`，也可直接粘贴绝对路径）；选一局 + 一个 capture 点 **Align & open** 即可，和 stable 完全一样。`/api/sources` 仍会把两边的新 replay 一起列出来，仅用于“最新一局”的默认预填。
+
+**只有 lazer 的机器**：把 **osu! folder** 留空、只填 **osu!lazer folder**（默认位置 `%APPDATA%\osu` 会自动识别）。此时 stable 的 Songs / Replays 派生全部跳过，watcher 只监听 lazer `exports`，看 replay 与手动对齐的路径与 stable 完全一致。**实时采集（Start capture）与客户端无关**（逐键读 HID + `WH_KEYBOARD_LL`），lazer 下一样能录；只是自动 watcher 依赖的 tosu `state` 粗锚点对 lazer 不一定可用，对齐会退回按键序列（“最后一段 playing run”在 lazer 下可能不准），建议直接用页面手动 align。
+
+已知限制：**lazer-only 的图没有原曲**。音频 blob 同样没有名字，`AudioFilename` 到 SHA-256 的映射只在 lazer 的 `client.realm` 里；本仓库不引入 Realm 依赖，所以这种情况 viewer 显示 `no song file`，时间线与 playfield 仍照常播放（时钟改为由播放头驱动）。如果同一张图在 stable 的 `Songs` 里也有，会优先走 stable 路径，音乐和 hitsound 一起可用。
 
 ### 没打完的一把（fail → F2）
 
@@ -242,7 +253,7 @@ uv run python tools/plot_depth.py tap.jsonl --out depth.html --threshold 6,4,8 -
 - 已确认可用的读取命令：`0x14`（逐键信息块，`payload[8]` 是该键实时电平，index 0..2；采集器/实时图走这条）、`0x15`（实时电平广播，一次含三个字节，但只有被逐键读刷新过的通道是新的）、`0x10`（逐键配置，index 0..5）、`0x19`（分段读键索引，index 0..3）。
 - https://github.com/Sayobot/sayo-device-web-hid 的默认分支主要是 Angular 模板，没有磁轴解析；https://github.com/Sayobot/SayoDevice_Web 是旧配置器，不能据此推定 O3C 新版协议。
 - https://sayodevice.com/pkg/sayo_lib_rs.js 暴露 `AnalogKeyInfo`、`AnalogKeyInfo2`、`BroadCastData`，WASM 字符串表给出 `raw_um`、`zero_pos`、`trigger_level`、`release_level` 等字段名，但离线驱动它需要重建 flutter_rust_bridge 的 wire 编码。
-- 待办：用真实对局数据验证双击判据；osu!lazer 的 replay 格式与 Songs / Replays 布局尚未处理。
+- 待办：用真实对局数据验证双击判据；osu!lazer 只支持「看 replay」，实时采集仍走 stable。
 - 采到的原始 NDJSON 可用 `python tools/inspect_capture.py <file>` 检查请求、报告频率及变化字节。
 
 ## License

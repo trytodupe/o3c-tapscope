@@ -8,6 +8,7 @@ selection are all built from it.
 """
 
 import json
+import os
 import re
 from pathlib import Path
 
@@ -27,6 +28,7 @@ def default_keys():
 def defaults():
     return {
         "osu_root": "",
+        "lazer_root": "",
         "keys": default_keys(),
         "device_path": "",
         "tosu_url": DEFAULT_TOSU_URL,
@@ -76,6 +78,7 @@ def coerce(payload):
     if not isinstance(payload, dict):
         return settings
     settings["osu_root"] = str(payload.get("osu_root") or "").strip()
+    settings["lazer_root"] = str(payload.get("lazer_root") or "").strip()
     settings["device_path"] = str(payload.get("device_path") or "").strip()
     settings["tosu_url"] = str(payload.get("tosu_url") or DEFAULT_TOSU_URL).strip() or DEFAULT_TOSU_URL
     settings["skin"] = str(payload.get("skin") or "").strip()
@@ -94,6 +97,8 @@ def load(path):
     settings = coerce(stored)
     if not settings["osu_root"]:
         settings["osu_root"] = detect_osu_root()
+    if not settings["lazer_root"]:
+        settings["lazer_root"] = detect_lazer_root()
     return settings
 
 
@@ -134,9 +139,35 @@ def detect_osu_root():
     return ""
 
 
+def detect_lazer_root():
+    """osu!lazer's default data folder, when it looks like one.
+
+    A machine without stable still has lazer's default data under ``%APPDATA%\\osu``
+    (portable installs keep it elsewhere and need the UI field). The folder qualifies
+    only when it carries lazer's own files, so a stale empty directory is ignored.
+    """
+    appdata = os.environ.get("APPDATA")
+    if not appdata:
+        return ""
+    folder = Path(appdata) / "osu"
+    if (folder / "client.realm").is_file() or (folder / "files").is_dir():
+        return str(folder)
+    return ""
+
+
 def subdir(settings, name):
     """``<osu_root>/<name>`` as a Path, or None when no root is set."""
     root = settings.get("osu_root")
+    return (Path(root) / name) if root else None
+
+
+def lazer_subdir(settings, name):
+    """``<lazer_root>/<name>`` as a Path, or None when no root is set.
+
+    osu!lazer exports replays to ``exports`` and keeps every imported file (including
+    beatmap ``.osu`` files) in the content-addressed ``files`` store.
+    """
+    root = settings.get("lazer_root")
     return (Path(root) / name) if root else None
 
 

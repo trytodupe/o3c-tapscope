@@ -62,8 +62,9 @@ input[type=number]{font:inherit;padding:6px 8px;width:5.5em;background:#0b1016;c
 <h2>view a replay</h2>
 <div class="panel settings">
   <div class="row">
-    <label for="osrPick">replay (.osr)</label>
-    <select id="osrPick"></select>
+    <label for="osrPath">replay (.osr)</label>
+    <input id="osrPath" type="text" size="48" placeholder="pick a .osr, or paste an absolute path">
+    <button id="pickOsr" type="button">Browse…</button>
     <label for="capPick">capture</label>
     <select id="capPick"></select>
     <button id="alignOpen" type="button">Align &amp; open</button>
@@ -91,12 +92,17 @@ input[type=number]{font:inherit;padding:6px 8px;width:5.5em;background:#0b1016;c
     <button id="pickOsu" type="button">Browse…</button>
   </div>
   <div class="row">
+    <label for="setLazer">osu!lazer folder (optional)</label>
+    <input id="setLazer" type="text" size="38" placeholder="D:\osulazer">
+    <button id="pickLazer" type="button">Browse…</button>
+  </div>
+  <div class="row">
     <label for="setSkin">skin (optional)</label>
     <input id="setSkin" type="text" size="38" placeholder="D:\osu!\Skins\custom-skin">
     <button id="pickSkin" type="button">Browse…</button>
   </div>
   <div class="row">
-    <label for="setTosu">tosu URL</label>
+    <label for="setTosu">tosu URL (optional)</label>
     <input id="setTosu" type="text" size="28">
     <label for="setPort">port</label>
     <input id="setPort" type="number" min="1" max="65535" style="width:6em">
@@ -261,6 +267,14 @@ const pagesEl = document.getElementById("pages");
 
 const escapeHtml = value => String(value ?? "").replace(/[&<>"']/g,
   ch => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[ch]));
+
+// Stored as UTC; shown in the browser's local zone so it matches wall-clock time.
+function localTime(value) {
+  const when = value ? new Date(value) : null;
+  if (!when || Number.isNaN(when.getTime())) return "";
+  return when.toLocaleTimeString([], {hour12: false});
+}
+
 function paintPages(pages) {
   if (!pages.length) {
     pagesEl.innerHTML = '<li class="sub">none yet — play a map, then export its .osr</li>';
@@ -270,9 +284,9 @@ function paintPages(pages) {
     const map = [page.artist, page.title].filter(Boolean).join(" - ");
     const version = page.version ? `[${page.version}]` : "";
     const depth = page.has_depth ? "depth" : "key state";
-    const time = (page.created_utc || "").slice(11, 19);
+    const time = localTime(page.created_utc);
     return `<li><a href="${escapeHtml(page.url)}" target="_blank">${escapeHtml(page.name)}</a> `
-      + `<span class="sub">${escapeHtml(map)} ${escapeHtml(version)} · ${depth} · ${escapeHtml(time)} UTC</span></li>`;
+      + `<span class="sub">${escapeHtml(map)} ${escapeHtml(version)} · ${depth} · ${escapeHtml(time)}</span></li>`;
   }).join("");
 }
 
@@ -362,6 +376,7 @@ function collectSettings() {
   });
   return {
     osu_root: field("setOsu").value,
+    lazer_root: field("setLazer").value,
     skin: field("setSkin").value,
     tosu_url: field("setTosu").value,
     port: field("setPort").value,
@@ -384,6 +399,7 @@ async function pickInto(id) {
 }
 
 field("pickOsu").addEventListener("click", () => pickInto("setOsu"));
+field("pickLazer").addEventListener("click", () => pickInto("setLazer"));
 field("pickSkin").addEventListener("click", () => pickInto("setSkin"));
 field("saveSettings").addEventListener("click", async () => {
   field("setStatus").textContent = "saving…";
@@ -422,19 +438,38 @@ function fillSelect(select, items, latestName, emptyText) {
 async function refreshSources() {
   try {
     const sources = await (await fetch("/api/sources")).json();
-    fillSelect(field("osrPick"), sources.replays || [], "", "no .osr in the osu! Replays folder");
     fillSelect(field("capPick"), sources.captures || [], sources.current_capture, "no captures yet");
+    // Prefill once with the newest replay, but never overwrite a path the user typed.
+    const osrPath = field("osrPath");
+    if (!osrPath.value && (sources.replays || []).length) {
+      osrPath.value = sources.replays[0].path || "";
+    }
   } catch (error) { /* studio may be restarting */ }
 }
 
+field("pickOsr").addEventListener("click", async () => {
+  const status = field("viewStatus");
+  status.textContent = "waiting for the file dialog…";
+  try {
+    const answer = await fetch("/api/pick-file", {method: "POST"});
+    const {path} = await answer.json();
+    if (path) field("osrPath").value = path;
+    status.textContent = path ? "" : "cancelled";
+  } catch (error) {
+    status.textContent = "file dialog unavailable";
+  }
+});
+
 field("alignOpen").addEventListener("click", async () => {
   const status = field("viewStatus");
+  const osr = field("osrPath").value.trim();
+  if (!osr) { status.textContent = "pick a .osr first"; return; }
   status.textContent = "aligning…";
   try {
     const answer = await fetch("/api/view", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({osr: field("osrPick").value, capture: field("capPick").value}),
+      body: JSON.stringify({osr, capture: field("capPick").value}),
     });
     const result = await answer.json();
     if (result.ok) { status.textContent = ""; window.open(result.url, "_blank"); refresh(); }
@@ -448,6 +483,7 @@ setInterval(refreshSources, 5000);
 
 fetch("/api/settings").then(r => r.json()).then(settings => {
   field("setOsu").value = settings.osu_root || "";
+  field("setLazer").value = settings.lazer_root || "";
   field("setSkin").value = settings.skin || "";
   field("setTosu").value = settings.tosu_url || "";
   field("setPort").value = settings.port == null ? "" : settings.port;

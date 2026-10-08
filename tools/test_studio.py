@@ -3,8 +3,18 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from studio import MAX_WINDOW_MIN, PlayRuns, ReplayStore, ReplayWatcher, Studio, StudioRecorder, window_seconds
+from studio import (
+    MAX_WINDOW_MIN,
+    PlayRuns,
+    ReplayStore,
+    ReplayWatcher,
+    Studio,
+    StudioRecorder,
+    stage_command,
+    window_seconds,
+)
 
 
 class RecorderTests(unittest.TestCase):
@@ -109,6 +119,16 @@ class WatcherTests(unittest.TestCase):
             self.assertEqual(watcher.scan_once(), [])
             self.assertEqual([item.name for item in watcher.scan_once()], ["grow.osr"])
 
+    def test_several_folders_can_be_watched_at_once(self):
+        with tempfile.TemporaryDirectory() as first, tempfile.TemporaryDirectory() as second:
+            stable, lazer = Path(first), Path(second)
+            watcher = ReplayWatcher([stable, lazer])
+            watcher.prime()
+            (lazer / "new.osr").write_bytes(b"x")
+            self.assertEqual(watcher.scan_once(), [])
+            ready = watcher.scan_once()
+        self.assertEqual([path.name for path in ready], ["new.osr"])
+
 
 class StudioTests(unittest.TestCase):
     def _studio(self, render):
@@ -209,6 +229,90 @@ class StudioTests(unittest.TestCase):
         sources = studio.sources()
         self.assertEqual([item["name"] for item in sources["replays"]], ["a.osr"])
         self.assertEqual([item["name"] for item in sources["captures"]], ["tap.jsonl"])
+
+    def test_sources_tag_which_folder_a_replay_came_from(self):
+        studio = self._studio(lambda *_: None)
+        studio.watch_dir = str(studio.captures_dir)
+        lazer = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, lazer, ignore_errors=True)
+        studio.lazer_exports = lazer
+        (studio.captures_dir / "a.osr").write_bytes(b"")
+        (lazer / "b.osr").write_bytes(b"")
+        tagged = {item["name"]: item["source"] for item in studio.sources()["replays"]}
+        self.assertEqual(tagged, {"a.osr": "stable", "b.osr": "lazer"})
+
+    def test_the_displayed_watch_dir_falls_back_to_lazer(self):
+        studio = self._studio(lambda *_: None)
+        lazer = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, lazer, ignore_errors=True)
+        studio.watch_dir = str(Path(tempfile.mkdtemp()) / "no-replays")
+        studio.lazer_exports = lazer
+        self.assertEqual(studio.status()["watch"]["dir"], str(lazer))
+
+    def test_manual_view_reaches_the_lazer_exports_folder(self):
+        calls = []
+
+        def render(osr, capture, slug):
+            calls.append(Path(osr).name)
+            return {"id": slug, "name": Path(osr).name}
+
+        studio = self._studio(render)
+        lazer = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, lazer, ignore_errors=True)
+        studio.lazer_exports = lazer
+        (lazer / "b.osr").write_bytes(b"")
+        (studio.captures_dir / "tap.jsonl").write_text("", encoding="utf-8")
+        url = studio.view("b.osr", "tap.jsonl", "lazer")
+        self.assertEqual(calls, ["b.osr"])
+        self.assertIn("id=", url)
+
+    def test_manual_view_accepts_an_absolute_path_from_the_file_dialog(self):
+        calls = []
+
+        def render(osr, capture, slug):
+            calls.append(Path(osr).name)
+            return {"id": slug, "name": Path(osr).name}
+
+        studio = self._studio(render)
+        outside = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
+        osr = outside / "picked.osr"
+        osr.write_bytes(b"")
+        (studio.captures_dir / "tap.jsonl").write_text("", encoding="utf-8")
+        url = studio.view(str(osr), "tap.jsonl")
+        self.assertEqual(calls, ["picked.osr"])
+        self.assertIn("id=", url)
+
+    def test_manual_view_rejects_an_absolute_path_that_is_not_a_replay(self):
+        studio = self._studio(lambda *_: None)
+        outside = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
+        other = outside / "notes.txt"
+        other.write_text("", encoding="utf-8")
+        (studio.captures_dir / "tap.jsonl").write_text("", encoding="utf-8")
+        with self.assertRaises(ValueError):
+            studio.view(str(other), "tap.jsonl")
+
+
+class StageCommandTests(unittest.TestCase):
+    """A machine with only osu!lazer has no Songs folder; staging must still work."""
+
+    def test_a_lazer_only_setup_reaches_the_renderer(self):
+        captured = {}
+
+        def fake_stage(spec, out):
+            captured["spec"] = spec
+            return {"id": out.name, "name": spec.replay.name}
+
+        with mock.patch("studio.stage_replay", fake_stage):
+            stage_command(None, Path("D:/lazer/files"), Path("out"), {},
+                          Path("a.osr"), None, "slug")
+        self.assertIsNone(captured["spec"].songs)
+        self.assertEqual(captured["spec"].lazer_files, Path("D:/lazer/files"))
+
+    def test_neither_root_is_a_clear_error(self):
+        with self.assertRaises(RuntimeError):
+            stage_command(None, None, Path("out"), {}, Path("a.osr"), None, "slug")
 
 
 class ReplayStoreTests(unittest.TestCase):

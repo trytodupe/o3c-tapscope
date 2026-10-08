@@ -1,8 +1,19 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from settings import calibration_data, coerce, defaults, load, save, subdir
+from settings import (
+    calibration_data,
+    coerce,
+    defaults,
+    detect_lazer_root,
+    lazer_subdir,
+    load,
+    save,
+    subdir,
+)
 
 
 class CoerceTests(unittest.TestCase):
@@ -35,6 +46,12 @@ class PersistenceTests(unittest.TestCase):
             self.assertEqual(saved["osu_root"], "D:/osu!")
             self.assertEqual(load(path)["keys"][0]["name"], "A")
 
+    def test_lazer_root_round_trips(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            save(path, {"lazer_root": "D:/osulazer"})
+            self.assertEqual(load(path)["lazer_root"], "D:/osulazer")
+
     def test_a_missing_file_is_not_an_error(self):
         with tempfile.TemporaryDirectory() as directory:
             settings = load(Path(directory) / "absent.json")
@@ -50,6 +67,34 @@ class DerivationTests(unittest.TestCase):
 
     def test_no_root_means_no_subdir(self):
         self.assertIsNone(subdir(defaults(), "Songs"))
+
+    def test_lazer_paths_are_derived_from_the_lazer_root(self):
+        settings = defaults()
+        settings["lazer_root"] = r"D:\osulazer"
+        self.assertEqual(str(lazer_subdir(settings, "exports")), r"D:\osulazer\exports")
+        self.assertEqual(str(lazer_subdir(settings, "files")), r"D:\osulazer\files")
+
+    def test_no_lazer_root_means_no_subdir(self):
+        self.assertIsNone(lazer_subdir(defaults(), "files"))
+
+
+class LazerDetectionTests(unittest.TestCase):
+    r"""A machine with only lazer still has its default data under %APPDATA%\osu."""
+
+    def test_the_default_lazer_data_folder_is_detected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            appdata = Path(directory)
+            (appdata / "osu").mkdir()
+            (appdata / "osu" / "client.realm").write_bytes(b"")
+            with mock.patch.dict(os.environ, {"APPDATA": str(appdata)}):
+                self.assertEqual(detect_lazer_root(), str(appdata / "osu"))
+
+    def test_a_folder_without_lazer_files_is_ignored(self):
+        with tempfile.TemporaryDirectory() as directory:
+            appdata = Path(directory)
+            (appdata / "osu").mkdir()
+            with mock.patch.dict(os.environ, {"APPDATA": str(appdata)}):
+                self.assertEqual(detect_lazer_root(), "")
 
     def test_calibration_carries_per_key_rt(self):
         settings = defaults()

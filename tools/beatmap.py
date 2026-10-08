@@ -23,9 +23,59 @@ _TRAILING_DATE = re.compile(r"\s*\(\d{4}-\d{2}-\d{2}\)[^()]*$")
 _BRACKETS = re.compile(r"\[[^\]]*\]")
 
 
+# osu!lazer keeps every imported file in a content-addressed store: the path is the
+# SHA-256 of the bytes and there is no name, so a beatmap is only recognisable by its
+# content. A beatmap's .osu starts with this header; the file store has no extension
+# to filter on, which is why the scan sniffs the bytes first and hashes only the hits.
+OSU_HEADER = b"osu file format"
+_BOM = b"\xef\xbb\xbf"
+
+# The MD5 -> path index of a lazer store is rebuilt lazily and kept for the life of the
+# process: staging several replays against one library should not rescan every time.
+_STORE_INDEX = {}
+
+
 def file_hash(path):
     """MD5 of the raw file bytes; this is the value a replay stores."""
     return hashlib.md5(Path(path).read_bytes()).hexdigest()
+
+
+def _is_beatmap_blob(path):
+    try:
+        with path.open("rb") as handle:
+            head = handle.read(len(OSU_HEADER) + len(_BOM))
+    except OSError:
+        return False
+    return head.lstrip(_BOM).startswith(OSU_HEADER)
+
+
+def _index_store(files_root):
+    """MD5 -> path for every .osu blob under a lazer file store."""
+    index = {}
+    for path in files_root.rglob("*"):
+        if path.is_file() and _is_beatmap_blob(path):
+            index[file_hash(path)] = path
+    return index
+
+
+def find_beatmap_in_store(beatmap_hash, files_root):
+    """Return the lazer ``.osu`` blob whose MD5 matches ``beatmap_hash``, or None.
+
+    Lazer addresses files by SHA-256 and never stores the original name, so the only
+    way back to the beatmap is to sniff every blob for the ``.osu`` header and hash the
+    candidates. The index is cached per store and rebuilt on a miss, which also picks
+    up beatmaps imported while the studio was running.
+    """
+    files_root = Path(files_root)
+    if not files_root.is_dir():
+        raise SystemExit(f"osu!lazer files folder not found: {files_root}")
+    wanted = beatmap_hash.lower()
+    key = str(files_root)
+    cached = _STORE_INDEX.get(key)
+    if cached is not None and wanted in cached:
+        return cached[wanted]
+    _STORE_INDEX[key] = _index_store(files_root)
+    return _STORE_INDEX[key].get(wanted)
 
 
 def filename_terms(name):

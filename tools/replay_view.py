@@ -26,7 +26,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from analyze import replay_frames
-from beatmap import filename_terms, find_beatmap, hit_windows, pair_presses, parse_beatmap
+from beatmap import (
+    filename_terms,
+    find_beatmap,
+    find_beatmap_in_store,
+    hit_windows,
+    pair_presses,
+    parse_beatmap,
+)
 from calibration import STEP_UM, level_lut, load_calibration
 from game_state import coarse_offset, last_play_run, load_state_samples
 from osu_align import align_with_anchor
@@ -199,7 +206,8 @@ class ReplaySpec:
     """Everything ``build_payload`` reads, so the CLI and the studio share one path."""
 
     replay: Path
-    songs: Path
+    songs: Path | None = None
+    lazer_files: Path | None = None
     beatmap: Path | None = None
     capture: Path | None = None
     tolerance_ms: float = 6.0
@@ -218,12 +226,19 @@ def build_payload(spec):
 
     beatmap_path = spec.beatmap
     if beatmap_path is None:
-        terms = filename_terms(spec.replay.name)
-        beatmap_path = find_beatmap(metadata["beatmap_hash"], spec.songs, terms)
+        # osu!stable keeps named folders under Songs; osu!lazer keeps every file in a
+        # flat content-addressed store. Try the matching one, then the other, so a
+        # replay exported by either client resolves when the map exists in both.
+        if spec.songs is not None and (Path(spec.songs).is_dir() or spec.lazer_files is None):
+            beatmap_path = find_beatmap(
+                metadata["beatmap_hash"], spec.songs, filename_terms(spec.replay.name)
+            )
+        if beatmap_path is None and spec.lazer_files is not None:
+            beatmap_path = find_beatmap_in_store(metadata["beatmap_hash"], spec.lazer_files)
         if beatmap_path is None:
             raise SystemExit(
-                f"No beatmap matched hash {metadata['beatmap_hash']} under {spec.songs}; "
-                "pass --beatmap"
+                f"No beatmap matched hash {metadata['beatmap_hash']} under "
+                f"{spec.songs or spec.lazer_files}; pass --beatmap"
             )
     beatmap = parse_beatmap(beatmap_path)
     windows = hit_windows(beatmap["od"])
@@ -414,6 +429,8 @@ def main():
     parser.add_argument("replay", type=Path)
     parser.add_argument("--beatmap", type=Path, help="the .osu file; found by hash when omitted")
     parser.add_argument("--songs", type=Path, default=Path(r"D:\osu!\Songs"))
+    parser.add_argument("--lazer", type=Path,
+                        help="osu!lazer folder, or its 'files' store; searched when --songs misses")
     parser.add_argument("--capture", type=Path, help="tap capture with analog levels for this play")
     parser.add_argument("--calibration", type=Path, help="calibration JSON; read from the device when omitted")
     parser.add_argument("--out", type=Path, required=True,
@@ -445,9 +462,16 @@ def main():
                      for index, name in enumerate(("Z", "X", "C"))],
         }
 
+    lazer_files = None
+    if args.lazer is not None:
+        # Accept either the lazer data folder or the content-addressed store itself.
+        nested = args.lazer / "files"
+        lazer_files = nested if nested.is_dir() else args.lazer
+
     spec = ReplaySpec(
         replay=args.replay,
         songs=args.songs,
+        lazer_files=lazer_files,
         beatmap=args.beatmap,
         capture=args.capture,
         tolerance_ms=args.tolerance_ms,
