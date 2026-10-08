@@ -1,0 +1,9 @@
+{
+  "source": "example",
+  "step_um": 50,
+  "keys": [
+    {"index": 0, "name": "Z", "table": []},
+    {"index": 1, "name": "X", "table": []},
+    {"index": 2, "name": "C", "table": []}
+  ]
+}

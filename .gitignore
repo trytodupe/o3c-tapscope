@@ -1,0 +1,11 @@
+# Local environment
+.venv/
+__pycache__/
+*.pyc
+
+# Runtime output (captures, staged replays, settings, shared shell)
+output/
+
+# Device calibration is per machine; the example is the shipped seed
+tools/calibration*.json
+!tools/calibration.example.json

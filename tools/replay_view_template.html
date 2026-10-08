@@ -1,0 +1,920 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><title>replay timeline</title>
+<style>
+:root{--bg:#0b0f13;--ink:#e6edf3;--dim:#8b98a5;--accent:#7c5cff;--k1:#4c8dff;--k2:#f4a261}
+*{box-sizing:border-box}
+body{margin:0;padding:14px 16px 26px;background:var(--bg);color:var(--ink);
+     font:14px/1.45 system-ui,"Segoe UI",sans-serif}
+h1{font-size:17px;margin:0 0 2px}
+.sub{color:var(--dim);font-size:12.5px}
+.bar{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:10px 0 8px}
+button{font:inherit;padding:5px 11px;background:#1f2933;color:var(--ink);
+       border:1px solid #38424d;border-radius:4px;cursor:pointer}
+button.on{background:#2b3f5c;border-color:var(--k1)}
+button.spd{padding:4px 8px;font-size:12.5px}
+a.back{color:#8ab4ff;text-decoration:none;font-size:12.5px}
+a.back:hover{text-decoration:underline}
+label.spd{display:inline-flex;align-items:center;gap:6px;color:var(--dim);font-size:12.5px}
+label.spd input{font:inherit;padding:4px 6px;width:4.5em;background:#0b1016;color:var(--ink);
+                border:1px solid #38424d;border-radius:4px}
+label.vol{display:inline-flex;align-items:center;gap:6px;color:var(--dim);font-size:12.5px}
+label.vol input[type=range]{width:104px;accent-color:var(--accent);vertical-align:middle}
+canvas{display:block;width:100%}
+#scrub{border:1px solid #2b3440;background:#0d1218;border-radius:4px;height:36px;cursor:pointer}
+#chart{border:1px solid #2b3440;background:#0b1016;height:380px;touch-action:none;cursor:crosshair}
+.stage{display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap;margin:10px 0 2px}
+#playfield{display:block;width:min(100%, calc(60vh * 16 / 9));aspect-ratio:16/9;margin:0 auto;
+           background:#000;border:1px solid #2b3440;border-radius:6px}
+#pfStatus{color:var(--dim);font-size:12.5px}
+.stage .side{flex:1 1 320px;min-width:280px}
+pre{font:12.5px/1.65 ui-monospace,Consolas,monospace;color:var(--dim);white-space:pre-wrap;margin:10px 0 0}
+pre b{color:var(--ink);font-weight:600}
+</style>
+<div><a class="back" href="/">&larr; studio</a></div>
+<h1 id="title"></h1>
+<div class="sub" id="subtitle"></div>
+<div class="stage">
+  <div style="flex:2 1 720px;min-width:420px">
+    <canvas id="playfield" width="1280" height="720"></canvas>
+    <div id="pfStatus">replay render: loading…</div>
+  </div>
+  <div class="side">
+    <div class="sub" style="margin-bottom:6px">hold <b>space</b> to play with audio · scrub updates the field</div>
+    <div id="pfInfo" class="sub"></div>
+  </div>
+</div>
+<div class="bar">
+  <button id="play">&gt; play</button>
+  <button id="fit">fit</button>
+  <button id="follow" class="on">follow</button>
+  <span class="sub">wheel zoom &middot; drag pan &middot; click seek &middot; space play &middot; arrow step</span>
+  <span class="sub" style="margin-left:auto">speed</span>
+  <button class="spd" data-rate="0.25">0.25</button>
+  <button class="spd" data-rate="0.5">0.5</button>
+  <button class="spd" data-rate="0.75">0.75</button>
+  <button class="spd on" data-rate="1">1.0</button>
+  <label class="spd" for="speed">&times;<input id="speed" type="number" min="0.1" max="2" step="0.05" value="1.0"></label>
+  <label class="vol">music <input id="volMusic" type="range" min="0" max="100" value="70"></label>
+  <label class="vol">hitsound <input id="volFx" type="range" min="0" max="100" value="90"></label>
+</div>
+<canvas id="scrub"></canvas>
+<canvas id="chart"></canvas>
+<pre id="readout"></pre>
+<script type="module">
+// One shared shell for every replay: the studio only hands it an id, and the payload
+// plus the .osr/.osu/song live under that replay's folder.
+const cfg = __CONFIG__;
+const replayId = new URLSearchParams(location.search).get("id") || "";
+const base = cfg.base + encodeURIComponent(replayId) + "/";
+window.__replayLoad = (async () => {
+  if (!replayId) throw new Error("no replay id in the URL; open one from the studio list");
+  const response = await fetch(base + "payload.json");
+  if (!response.ok) throw new Error(`payload.json ${response.status} for ${replayId}`);
+  return {data: await response.json(), base, cfg};
+})();
+const {data} = await window.__replayLoad;
+// When the studio serves this page, the device settings are the live ones (per-key RT
+// and labels), so a settings change also reaches replays staged under an older setting.
+// Static serving (python -m http.server) just keeps the payload snapshot.
+try {
+  const settings = await (await fetch("/api/settings")).json();
+  (settings.keys || []).forEach((key, index) => {
+    const target = data.calibration.keys[index];
+    if (!target) return;
+    if (key.name) target.name = key.name;
+    target.rt_range_mm = [key.rt_low ?? null, key.rt_high ?? null];
+  });
+} catch (err) {
+  /* no studio: use the snapshot baked into payload.json */
+}
+const meta = data.meta;
+const analog = data.levels.mode === "analog";
+const rtOf = lane => lane.key.rt_range_mm || [null, null];
+const lanes = [
+  {stream: "K1", color: "#4c8dff", key: data.calibration.keys[0] || {name: "Z", lut_mm: [], travel_mm: 3}},
+  {stream: "K2", color: "#f4a261", key: data.calibration.keys[1] || {name: "X", lut_mm: [], travel_mm: 3}},
+];
+const levels = data.levels.samples;
+const levelTimes = levels.map(sample => sample[0]);
+const notes = data.notes;
+const noteTimes = notes.map(note => note[0]);
+const pairs = data.pairs.slice().sort((a, b) => a.note - b.note);
+const strays = data.stray.slice().sort((a, b) => a.time - b.time);
+const presses = {K1: data.presses.K1, K2: data.presses.K2};
+const duration = meta.duration_ms;
+const pad = {left: 78, right: 24, top: 16, bottom: 32};
+const gap = 8;
+const judgementColor = {"300": "#31c48d", "100": "#ffd166", "50": "#ff8f4d"};
+const state = {
+  t: 0,
+  view: {t0: 0, t1: Math.min(duration, 8000)},
+  playing: false,
+  cursor: null,
+  hoverBand: null,
+};
+// Shared with the playfield module so a rate set before the audio is ready still lands.
+const rate = {value: 1};
+window.__rate = rate;
+const canvas = document.getElementById("chart");
+const context = canvas.getContext("2d");
+const scrubCanvas = document.getElementById("scrub");
+const scrubContext = scrubCanvas.getContext("2d");
+const readout = document.getElementById("readout");
+const playButton = document.getElementById("play");
+const followButton = document.getElementById("follow");
+let dims = {w: 1200, h: 300};
+
+document.getElementById("title").textContent =
+  `${meta.beatmap.artist} - ${meta.beatmap.title} [${meta.beatmap.version}]`;
+const source = analog
+  ? (data.levels.alignment && data.levels.alignment.anchor
+      ? `depth from the device calibration (${data.calibration.source}, `
+        + `${data.calibration.step_um} um/step); the game reader anchored the clock at `
+        + `${data.levels.alignment.anchor.offset_ms.toFixed(0)} ms and the press sequence refined it to `
+        + `${data.levels.alignment.offset_ms.toFixed(1)} ms`
+      : `depth from the device calibration (${data.calibration.source}, `
+        + `${data.calibration.step_um} um/step); aligned by press sequence alone, no game reader in this capture`)
+  : "no capture attached: bars 2 and 3 show the key state recorded in the replay, not depth";
+const markNote = lanes
+  .map(lane => ({name: lane.key.name, rt: rtOf(lane).filter(value => value != null && value > 0)}))
+  .filter(item => item.rt.length)
+  .map(item => `${item.name} ${item.rt.map(value => value.toFixed(2)).join("-")} mm`)
+  .join(" · ");
+document.getElementById("subtitle").textContent =
+  `${meta.player} | ${meta.mods} | ${meta.note_count} notes | OD ${meta.beatmap.od} | `
+  + `AR ${meta.beatmap.ar} | ${meta.beatmap.bpm} BPM | frames ${meta.frame_interval_ms} ms | ${source}`
+  + (markNote ? ` | RT ${markNote} (from key top)` : "")
+  + (data.complete ? ""
+      : ` | INCOMPLETE: frames stop at ${(data.played_until_ms / 1000).toFixed(1)} s`
+        + `, ${data.unplayed.length} notes never played`);
+
+// Band heights derive from the canvas height so the timeline always fills the pane it
+// is drawn into, instead of being laid out at one height and scaled to another. The
+// 62:88 weights are the fixed heights the bands used before they became elastic.
+const bandWeights = [62, 88, 88];
+function bands() {
+  const usable = Math.max(120, dims.h - pad.top - pad.bottom - gap * 2);
+  const total = bandWeights.reduce((sum, weight) => sum + weight, 0);
+  const heights = bandWeights.map(weight => usable * weight / total);
+  const list = [];
+  let top = pad.top;
+  list.push({id: "notes", title: "note timing vs presses", top, height: heights[0]});
+  top += heights[0] + gap;
+  lanes.forEach((lane, index) => {
+    list.push({id: lane.stream, lane, index, top, height: heights[index + 1],
+               title: `${lane.key.name} depth`});
+    top += heights[index + 1] + gap;
+  });
+  return list;
+}
+const laneBand = id => bands().find(band => band.id === id);
+const plotWidth = () => dims.w - pad.left - pad.right;
+const xOf = t => pad.left + (t - state.view.t0) / ((state.view.t1 - state.view.t0) || 1) * plotWidth();
+const tOf = px => state.view.t0 + (px - pad.left) / plotWidth() * (state.view.t1 - state.view.t0);
+// The RT-range bounds can sit past the calibrated travel (the device range may be
+// wider than the reachable stroke), so grow the axis to keep both lines on screen.
+const axisMax = lane => {
+  if (!analog) return 1;
+  const values = [lane.key.travel_mm || 3, ...rtOf(lane).filter(value => value != null && value > 0)];
+  return Math.max(0.5, Math.ceil(Math.max(...values) * 2) / 2);
+};
+// Depth grows downwards: 0 mm (rest, the key top) sits at the top of the band and the
+// deepest value at the bottom, matching how the switch physically travels.
+function yOf(value, band) {
+  const inner = 14;
+  const usable = band.height - inner * 2;
+  return band.top + inner + (value / axisMax(band.lane)) * usable;
+}
+function valueOfY(y, band) {
+  const inner = 14;
+  const usable = band.height - inner * 2;
+  const value = ((y - band.top - inner) / usable) * axisMax(band.lane);
+  return Math.max(0, Math.min(axisMax(band.lane), value));
+}
+function mmOfRaw(lane, raw) {
+  const lut = lane.key.lut_mm || [];
+  if (!lut.length) return 0;
+  return lut[Math.max(0, Math.min(lut.length - 1, Math.round(raw)))];
+}
+function rawOfMm(lane, mm) {
+  const lut = lane.key.lut_mm || [];
+  let best = 0;
+  for (let level = 0; level < lut.length; level += 1) if (lut[level] <= mm + 1e-9) best = level;
+  return best;
+}
+const sampleValue = (sample, index) => analog ? mmOfRaw(lanes[index], sample[1 + index]) : (sample[1 + index] || 0);
+function lowerBound(times, t) {
+  let low = 0, high = times.length;
+  while (low < high) { const mid = (low + high) >> 1; if (times[mid] < t) low = mid + 1; else high = mid; }
+  return low;
+}
+function nearest(times, t) {
+  if (!times.length) return null;
+  const index = lowerBound(times, t);
+  const candidates = [times[index - 1], times[index]].filter(value => value !== undefined);
+  if (!candidates.length) return null;
+  return candidates.reduce((a, b) => (Math.abs(a - t) <= Math.abs(b - t) ? a : b));
+}
+function sampleAt(time) {
+  if (!levels.length) return null;
+  const index = lowerBound(levelTimes, time);
+  const candidates = [levels[index - 1], levels[index]].filter(Boolean);
+  if (!candidates.length) return null;
+  return candidates.reduce((a, b) => (Math.abs(a[0] - time) <= Math.abs(b[0] - time) ? a : b));
+}
+function clock(ms) {
+  const sign = ms < 0 ? "-" : "";
+  ms = Math.abs(ms);
+  const minutes = Math.floor(ms / 60000);
+  const seconds = Math.floor((ms % 60000) / 1000);
+  return `${sign}${minutes}:${String(seconds).padStart(2, "0")}.${String(Math.floor(ms % 1000)).padStart(3, "0")}`;
+}
+function stepMs() {
+  const span = state.view.t1 - state.view.t0;
+  return Math.max(1, span / 400);
+}
+
+function layout() {
+  const dpr = window.devicePixelRatio || 1;
+  dims.w = canvas.clientWidth || 1200;
+  dims.h = canvas.clientHeight || 380;
+  canvas.width = Math.round(dims.w * dpr);
+  canvas.height = Math.round(dims.h * dpr);
+  context.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const width = scrubCanvas.clientWidth || 1200;
+  scrubCanvas.width = Math.round(width * dpr);
+  scrubCanvas.height = Math.round(36 * dpr);
+  scrubContext.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+function drawScrub() {
+  const w = scrubCanvas.clientWidth || 1200, h = 36;
+  scrubContext.clearRect(0, 0, w, h);
+  const buckets = new Array(Math.ceil(w)).fill(0);
+  for (const time of noteTimes) {
+    const bucket = Math.min(buckets.length - 1, Math.max(0, Math.floor(time / duration * w)));
+    buckets[bucket] += 1;
+  }
+  const peak = Math.max(1, ...buckets);
+  scrubContext.fillStyle = "#22314a";
+  for (let x = 0; x < buckets.length; x += 1) {
+    if (!buckets[x]) continue;
+    const bar = 3 + (buckets[x] / peak) * (h - 16);
+    scrubContext.fillRect(x, h - 5 - bar, 1, bar);
+  }
+  const toPx = t => t / duration * w;
+  scrubContext.fillStyle = "rgba(124,92,255,0.16)";
+  scrubContext.fillRect(toPx(state.view.t0), 0, Math.max(2, toPx(state.view.t1) - toPx(state.view.t0)), h);
+  scrubContext.strokeStyle = "#7c5cff";
+  scrubContext.lineWidth = 1.5;
+  scrubContext.beginPath();
+  scrubContext.moveTo(toPx(state.t), 0);
+  scrubContext.lineTo(toPx(state.t), h);
+  scrubContext.stroke();
+  scrubContext.font = "11px ui-monospace,Consolas,monospace";
+  scrubContext.fillStyle = "#8b98a5";
+  scrubContext.fillText("0:00", 4, h - 21);
+  const label = clock(duration);
+  scrubContext.fillText(label, w - scrubContext.measureText(label).width - 4, h - 21);
+}
+
+function drawTimeGrid(bandList) {
+  const span = state.view.t1 - state.view.t0;
+  const step = [50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000, 30000, 60000]
+    .find(value => span / value <= 9) || 120000;
+  const bottom = bandList[bandList.length - 1].top + bandList[bandList.length - 1].height;
+  context.font = "11px ui-monospace,Consolas,monospace";
+  for (let t = Math.ceil(state.view.t0 / step) * step; t <= state.view.t1; t += step) {
+    const x = xOf(t);
+    context.strokeStyle = "#131a23";
+    context.beginPath();
+    context.moveTo(x, pad.top);
+    context.lineTo(x, bottom);
+    context.stroke();
+    context.fillStyle = "#8b98a5";
+    context.fillText(clock(t), x + 3, dims.h - 12);
+  }
+}
+
+function visibleNotes() {
+  const first = lowerBound(noteTimes, state.view.t0);
+  const last = lowerBound(noteTimes, state.view.t1);
+  return {first, last: Math.min(notes.length, last + 1)};
+}
+
+function drawBandTitle(band, lines) {
+  context.font = "11px ui-monospace,Consolas,monospace";
+  const width = Math.max(...lines.map(line => context.measureText(line).width)) + 12;
+  const height = 8 + lines.length * 14;
+  context.fillStyle = "rgba(11,16,22,0.78)";
+  context.fillRect(pad.left + 4, band.top + 3, width, height);
+  context.fillStyle = "#8b98a5";
+  lines.forEach((line, index) => context.fillText(line, pad.left + 10, band.top + 16 + index * 14));
+}
+
+function drawNotesBand(band) {
+  const center = band.top + band.height / 2;
+  const detailed = state.view.t1 - state.view.t0 < 6000;
+  context.save();
+  context.beginPath();
+  context.rect(pad.left, band.top, plotWidth(), band.height);
+  context.clip();
+  context.strokeStyle = "#1b2430";
+  context.beginPath();
+  context.moveTo(pad.left, center);
+  context.lineTo(pad.left + plotWidth(), center);
+  context.stroke();
+  const {first, last} = visibleNotes();
+  if (detailed) {
+    context.fillStyle = "rgba(230,237,243,0.05)";
+    for (let index = first; index < last; index += 1) {
+      const time = noteTimes[index];
+      const x0 = xOf(time - data.windows["300"]), x1 = xOf(time + data.windows["300"]);
+      context.fillRect(x0, band.top + 8, Math.max(1, x1 - x0), band.height - 16);
+    }
+  }
+  context.strokeStyle = "#e6edf3";
+  context.lineWidth = 1;
+  for (let index = first; index < last; index += 1) {
+    const x = xOf(noteTimes[index]);
+    context.strokeStyle = notes[index][1] === "circle" ? "#e6edf3" : "#7d8794";
+    context.beginPath();
+    context.moveTo(x, center - 11);
+    context.lineTo(x, center + 11);
+    context.stroke();
+  }
+  for (const pair of pairs) {
+    if (pair.note < state.view.t0 - 500 || pair.note > state.view.t1 + 500) continue;
+    const xNote = xOf(pair.note), xPress = xOf(pair.press);
+    const color = judgementColor[pair.judgement] || "#8b98a5";
+    context.strokeStyle = color;
+    context.globalAlpha = 0.5;
+    context.beginPath();
+    context.moveTo(xNote, center);
+    context.lineTo(xPress, center + (pair.stream === "K1" ? 14 : -14));
+    context.stroke();
+    context.globalAlpha = 1;
+    context.fillStyle = color;
+    context.beginPath();
+    context.arc(xPress, center + (pair.stream === "K1" ? 14 : -14), 3.2, 0, Math.PI * 2);
+    context.fill();
+  }
+  context.strokeStyle = "#8b98a5";
+  for (const stray of strays) {
+    if (stray.time < state.view.t0 || stray.time > state.view.t1) continue;
+    const x = xOf(stray.time);
+    context.strokeRect(x - 3, center - 3, 6, 6);
+  }
+  context.restore();
+  drawBandTitle(band, [band.title, `±300 ms = ${data.windows["300"].toFixed(1)} ms`]);
+}
+
+function drawLevelBand(band) {
+  const lane = band.lane;
+  const max = axisMax(lane);
+  const major = analog ? (max <= 1.5 ? 0.25 : max <= 3.5 ? 0.5 : 1) : 1;
+  const minor = major / (analog ? 5 : 1);
+  context.font = "11px ui-monospace,Consolas,monospace";
+  context.save();
+  context.beginPath();
+  context.rect(pad.left, band.top, plotWidth(), band.height);
+  context.clip();
+  for (let value = 0; value <= max + 1e-9; value += minor) {
+    const y = yOf(value, band);
+    const isMajor = Math.abs(value / major - Math.round(value / major)) < 1e-6;
+    context.strokeStyle = isMajor ? "#1b2430" : "#141c25";
+    context.beginPath();
+    context.moveTo(pad.left, y);
+    context.lineTo(pad.left + plotWidth(), y);
+    context.stroke();
+  }
+  const start = lowerBound(levelTimes, state.view.t0);
+  let stop = lowerBound(levelTimes, state.view.t1);
+  if (start > 0) stop = Math.min(levels.length, stop + 1);
+  const count = Math.max(0, stop - start);
+  if (!count) { context.restore(); return; }
+  const stride = Math.max(1, Math.floor(count / (plotWidth() * 2)));
+  context.strokeStyle = lane.color;
+  context.lineWidth = 1.4;
+  context.beginPath();
+  let previousY = null;
+  for (let index = start; index < stop; index += stride) {
+    const sample = levels[index];
+    const x = xOf(sample[0]);
+    const y = yOf(sampleValue(sample, band.index), band);
+    if (index === start) {
+      context.moveTo(x, y);
+    } else if (analog) {
+      context.lineTo(x, y);
+    } else {
+      // The fallback lanes carry a key state, not a depth: draw them as a square
+      // wave so a press cannot be mistaken for a depth ramp.
+      context.lineTo(x, previousY);
+      context.lineTo(x, y);
+    }
+    previousY = y;
+  }
+  context.stroke();
+  if (analog) {
+    context.globalAlpha = 0.12;
+    context.fillStyle = lane.color;
+    context.lineTo(xOf(levels[stop - 1][0]), yOf(0, band));
+    context.lineTo(xOf(levels[start][0]), yOf(0, band));
+    context.closePath();
+    context.fill();
+    context.globalAlpha = 1;
+    const rt = rtOf(lane);
+    if (rt.some(value => value >= 0 && value != null)) {
+      const lowValue = rt[0] == null ? 0 : rt[0];
+      const highValue = rt[1] == null ? axisMax(lane) : rt[1];
+      const yA = yOf(Math.min(highValue, axisMax(lane)), band);
+      const yB = yOf(Math.max(lowValue, 0), band);
+      context.save();
+      context.globalAlpha = 0.07;
+      context.fillStyle = "#7c5cff";
+      context.fillRect(pad.left, Math.min(yA, yB), plotWidth(), Math.abs(yB - yA));
+      context.restore();
+      context.setLineDash([6, 4]);
+      context.lineWidth = 1.2;
+      context.font = "10px ui-monospace,Consolas,monospace";
+      for (const value of rt) {
+        if (value == null || value < 0) continue;
+        const y = yOf(value, band);
+        context.strokeStyle = "#a99bff";
+        context.beginPath();
+        context.moveTo(pad.left, y);
+        context.lineTo(pad.left + plotWidth(), y);
+        context.stroke();
+        const label = `RT ${value.toFixed(2)}`;
+        context.fillStyle = "#a99bff";
+        context.fillText(label, pad.left + plotWidth() - context.measureText(label).width - 4, y - 3);
+      }
+      context.setLineDash([]);
+    }
+  }
+  context.restore();
+  context.save();
+  context.beginPath();
+  context.rect(pad.left, band.top, plotWidth(), band.height);
+  context.clip();
+  context.strokeStyle = lane.color;
+  for (const time of presses[lane.stream]) {
+    if (time < state.view.t0 || time > state.view.t1) continue;
+    const x = xOf(time);
+    context.beginPath();
+    context.moveTo(x, band.top + 1);
+    context.lineTo(x, band.top + 12);
+    context.stroke();
+  }
+  context.restore();
+  drawBandTitle(band, [`${lane.key.name} depth - ${analog ? "mm" : "state"}`]);
+  context.font = "11px ui-monospace,Consolas,monospace";
+  context.textAlign = "right";
+  context.fillStyle = "#8b98a5";
+  for (let value = 0; value <= max + 1e-9; value += major) {
+    const label = analog ? value.toFixed(2) : value >= 1 ? "1" : "0";
+    context.fillText(label, pad.left - 8, yOf(value, band) + 4);
+  }
+  context.textAlign = "left";
+}
+
+function drawRulers() {
+  const band = state.hoverBand && state.hoverBand.lane ? state.hoverBand : null;
+  if (!band || !state.cursor) return;
+  const lane = band.lane;
+  const inner = 14;
+  const x = Math.max(pad.left, Math.min(pad.left + plotWidth(), state.cursor.x));
+  const y = Math.max(band.top + inner, Math.min(band.top + band.height - inner, state.cursor.y));
+  const value = valueOfY(y, band);
+  context.save();
+  context.setLineDash([4, 4]);
+  context.lineWidth = 1;
+  context.strokeStyle = "rgba(230,237,243,0.8)";
+  context.beginPath();
+  context.moveTo(pad.left, y + 0.5);
+  context.lineTo(pad.left + plotWidth(), y + 0.5);
+  context.stroke();
+  context.restore();
+  // Ring where the recorded trace actually sits at the crosshair time, so the free
+  // ruler line and the captured depth are never mistaken for one another.
+  const sample = sampleAt(tOf(x));
+  if (sample) {
+    context.beginPath();
+    context.arc(x, yOf(sampleValue(sample, band.index), band), 3.6, 0, Math.PI * 2);
+    context.fillStyle = "#0b1016";
+    context.fill();
+    context.strokeStyle = "#a99bff";
+    context.lineWidth = 1.6;
+    context.stroke();
+  }
+  const label = analog ? `${value.toFixed(2)} mm` : value >= 0.5 ? "pressed" : "released";
+  context.font = "11px ui-monospace,Consolas,monospace";
+  const width = context.measureText(label).width + 10;
+  context.fillStyle = "rgba(124,92,255,0.94)";
+  context.fillRect(pad.left - 8 - width, y - 9, width, 18);
+  context.fillStyle = "#0b0f13";
+  context.fillText(label, pad.left - 8 - width + 5, y + 4);
+}
+
+function drawCrosshair() {
+  if (!state.cursor) return;
+  const list = bands();
+  const bottom = list[list.length - 1].top + list[list.length - 1].height;
+  const x = Math.max(pad.left, Math.min(pad.left + plotWidth(), state.cursor.x));
+  context.save();
+  context.setLineDash([5, 3]);
+  context.lineWidth = 1;
+  context.strokeStyle = "rgba(124,92,255,0.9)";
+  context.beginPath();
+  context.moveTo(x + 0.5, pad.top);
+  context.lineTo(x + 0.5, bottom);
+  context.stroke();
+  context.restore();
+  const label = clock(tOf(x));
+  context.font = "11px ui-monospace,Consolas,monospace";
+  const width = context.measureText(label).width + 8;
+  const anchor = Math.max(pad.left, Math.min(pad.left + plotWidth() - width, x - width / 2));
+  context.fillStyle = "rgba(124,92,255,0.94)";
+  context.fillRect(anchor, dims.h - 19, width, 15);
+  context.fillStyle = "#0b0f13";
+  context.fillText(label, anchor + 4, dims.h - 8);
+}
+
+function drawStopped(list) {
+  // A replay exported after a fail holds frames only up to that moment; shade what
+  // the attempt never reached so an abandoned play is not read as an empty chart.
+  const stop = data.played_until_ms;
+  if (data.complete || !stop) return;
+  const bottom = list[list.length - 1].top + list[list.length - 1].height;
+  const right = pad.left + plotWidth();
+  const x = Math.max(pad.left, Math.min(right, xOf(stop)));
+  context.save();
+  context.fillStyle = "rgba(255,107,107,0.07)";
+  context.fillRect(x, pad.top, right - x, bottom - pad.top);
+  if (xOf(stop) >= pad.left && xOf(stop) <= right) {
+    context.strokeStyle = "#ff6b6b";
+    context.setLineDash([5, 4]);
+    context.lineWidth = 1.4;
+    context.beginPath();
+    context.moveTo(x, pad.top);
+    context.lineTo(x, bottom);
+    context.stroke();
+    context.setLineDash([]);
+    context.font = "11px ui-monospace,Consolas,monospace";
+    const label = `stopped ${(stop / 1000).toFixed(1)} s`;
+    const width = context.measureText(label).width + 10;
+    const labelX = Math.min(x + 6, right - width - 2);
+    context.fillStyle = "rgba(255,107,107,0.9)";
+    context.fillRect(labelX, pad.top + 3, width, 16);
+    context.fillStyle = "#0b0f13";
+    context.fillText(label, labelX + 5, pad.top + 15);
+  }
+  context.restore();
+}
+
+function drawPlayhead() {
+  const x = xOf(state.t);
+  if (x < pad.left || x > pad.left + plotWidth()) return;
+  const list = bands();
+  const bottom = list[list.length - 1].top + list[list.length - 1].height;
+  context.strokeStyle = "#7c5cff";
+  context.lineWidth = 1;
+  context.beginPath();
+  context.moveTo(x, pad.top - 4);
+  context.lineTo(x, bottom);
+  context.stroke();
+  context.fillStyle = "#7c5cff";
+  context.beginPath();
+  context.moveTo(x - 4, pad.top - 4);
+  context.lineTo(x + 4, pad.top - 4);
+  context.lineTo(x, pad.top + 2);
+  context.closePath();
+  context.fill();
+}
+
+function describe(time) {
+  const sample = sampleAt(time);
+  const note = nearest(noteTimes, time);
+  const notesLine = note === null ? "note -" : `nearest note Δ ${(time - note).toFixed(1)} ms`;
+  const laneLines = lanes.map((lane, index) => {
+    const raw = sample ? sample[1 + index] : null;
+    if (raw === null) return `${lane.key.name} -`;
+    const value = analog ? `${mmOfRaw(lane, raw).toFixed(2)} mm (raw ${raw})` : raw ? "pressed" : "released";
+    const press = nearest(presses[lane.stream], time);
+    const pressLine = press === null || Math.abs(time - press) > 250 ? ""
+      : `   press Δ ${(time - press) >= 0 ? "+" : ""}${(time - press).toFixed(1)} ms`;
+    return `${lane.key.name} ${value}${pressLine}`;
+  });
+  return `<b>${clock(time)}</b>   ${notesLine}\n${laneLines.join("\n")}`;
+}
+
+function draw() {
+  const list = bands();
+  context.clearRect(0, 0, dims.w, dims.h);
+  drawTimeGrid(list);
+  drawNotesBand(list[0]);
+  drawLevelBand(list[1]);
+  drawLevelBand(list[2]);
+  drawStopped(list);
+  drawRulers();
+  drawCrosshair();
+  drawPlayhead();
+  const time = state.cursor ? tOf(state.cursor.x) : state.t;
+  readout.innerHTML = describe(time);
+  if (typeof window.onPlayfieldTime === "function") window.onPlayfieldTime(state.t);
+}
+
+function render() {
+  drawScrub();
+  draw();
+}
+
+function clampView() {
+  let span = Math.max(stepMs() * 4, Math.min(state.view.t1 - state.view.t0, duration));
+  let t0 = Math.max(0, Math.min(state.view.t0, duration - span));
+  const hash = `#t=${Math.round(state.t)}&span=${Math.round(span)}`;
+  if (location.hash !== hash) history.replaceState(null, "", hash);
+  state.view = {t0, t1: t0 + span};
+}
+function centerOn(t) {
+  const span = state.view.t1 - state.view.t0;
+  state.view = {t0: t - span / 2, t1: t + span / 2};
+  clampView();
+}
+function follow() {
+  if (!followButton.classList.contains("on")) return;
+  const span = state.view.t1 - state.view.t0;
+  const margin = span * 0.35;
+  if (state.t < state.view.t0 + margin || state.t > state.view.t1 - margin) centerOn(state.t);
+}
+function seek(t, keepView) {
+  state.t = Math.max(0, Math.min(duration, t));
+  if (window.__audio) window.__audio.seek(state.t);
+  if (keepView) { follow(); render(); return; }
+  render();
+}
+function zoom(factor, anchorTime) {
+  const span = state.view.t1 - state.view.t0;
+  const anchor = anchorTime === undefined ? (state.view.t0 + state.view.t1) / 2 : anchorTime;
+  const next = Math.max(stepMs() * 4, Math.min(duration, span * factor));
+  const ratio = (anchor - state.view.t0) / (span || 1);
+  state.view = {t0: anchor - next * ratio, t1: anchor + next * (1 - ratio)};
+  clampView();
+  render();
+}
+function fit() {
+  state.view = {t0: 0, t1: duration};
+  clampView();
+  render();
+}
+
+let dragging = null;
+function chartPositions(event) {
+  const rect = canvas.getBoundingClientRect();
+  return {x: event.clientX - rect.left, y: event.clientY - rect.top};
+}
+canvas.addEventListener("pointerdown", event => {
+  const {x, y} = chartPositions(event);
+  dragging = {x, y, moved: false, t0: state.view.t0};
+  canvas.setPointerCapture(event.pointerId);
+});
+canvas.addEventListener("pointermove", event => {
+  const {x, y} = chartPositions(event);
+  state.cursor = {x, y};
+  state.hoverBand = bands().find(band => y >= band.top && y <= band.top + band.height) || null;
+  if (dragging) {
+    const shift = (dragging.x - x) / plotWidth() * (state.view.t1 - state.view.t0);
+    if (Math.abs(dragging.x - x) > 3 || Math.abs(dragging.y - y) > 3) dragging.moved = true;
+    if (dragging.moved) {
+      state.view = {t0: dragging.t0 + shift, t1: dragging.t0 + shift + (state.view.t1 - state.view.t0)};
+      clampView();
+    }
+  }
+  render();
+});
+canvas.addEventListener("pointerup", event => {
+  const {x} = chartPositions(event);
+  if (dragging && !dragging.moved) seek(tOf(x));
+  dragging = null;
+});
+canvas.addEventListener("pointerleave", () => {
+  state.cursor = null;
+  state.hoverBand = null;
+  render();
+});
+canvas.addEventListener("wheel", event => {
+  event.preventDefault();
+  const {x} = chartPositions(event);
+  zoom(event.deltaY > 0 ? 1.18 : 1 / 1.18, tOf(x));
+}, {passive: false});
+
+let scrubbing = false;
+scrubCanvas.addEventListener("pointerdown", event => {
+  scrubbing = true;
+  scrubCanvas.setPointerCapture(event.pointerId);
+  scrubTo(event);
+});
+scrubCanvas.addEventListener("pointermove", event => { if (scrubbing) scrubTo(event); });
+scrubCanvas.addEventListener("pointerup", () => { scrubbing = false; });
+scrubCanvas.addEventListener("wheel", event => {
+  event.preventDefault();
+  zoom(event.deltaY > 0 ? 1.25 : 1 / 1.25, state.t);
+}, {passive: false});
+function scrubTo(event) {
+  const rect = scrubCanvas.getBoundingClientRect();
+  const ratio = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+  seek(ratio * duration, true);
+}
+
+playButton.addEventListener("click", togglePlay);
+followButton.addEventListener("click", () => {
+  followButton.classList.toggle("on");
+});
+document.getElementById("fit").addEventListener("click", fit);
+const speedInput = document.getElementById("speed");
+const speedButtons = Array.from(document.querySelectorAll("button.spd"));
+function setRate(value) {
+  const next = Math.max(0.1, Math.min(2, Number(value) || 1));
+  rate.value = next;
+  speedInput.value = next.toFixed(2);
+  speedButtons.forEach(button => button.classList.toggle("on", Number(button.dataset.rate) === next));
+  if (window.__audio && window.__audio.setRate) window.__audio.setRate(next);
+}
+speedInput.addEventListener("change", () => setRate(speedInput.value));
+speedButtons.forEach(button => button.addEventListener("click", () => setRate(button.dataset.rate)));
+window.addEventListener("keydown", event => {
+  if (event.code === "Space") { event.preventDefault(); togglePlay(); }
+  else if (event.code === "ArrowLeft") seek(state.t - (event.shiftKey ? 100 : stepMs() / 2), true);
+  else if (event.code === "ArrowRight") seek(state.t + (event.shiftKey ? 100 : stepMs() / 2), true);
+  else if (event.code === "Home") seek(0, true);
+  else if (event.code === "End") seek(duration, true);
+  else if (event.code === "KeyF") fit();
+  else if (event.code === "Equal") zoom(1 / 1.5);
+  else if (event.code === "Minus") zoom(1.5);
+});
+function togglePlay() {
+  state.playing = !state.playing;
+  playButton.textContent = state.playing ? "|| pause" : "> play";
+  if (state.playing) {
+    if (window.__audio) window.__audio.play(state.t);
+    requestAnimationFrame(tick);
+  } else if (window.__audio) {
+    window.__audio.pause();
+  }
+}
+let last = 0;
+function tick(now) {
+  if (!state.playing) return;
+  const audioTime = window.__audio ? window.__audio.clock() : null;
+  if (typeof audioTime === "number") {
+    state.t = Math.max(0, Math.min(duration, audioTime));
+  } else {
+    const delta = last ? now - last : 0;
+    last = now;
+    state.t = Math.min(duration, state.t + delta * rate.value);
+  }
+  follow();
+  render();
+  if (state.t >= duration) { togglePlay(); return; }
+  requestAnimationFrame(tick);
+}
+
+window.addEventListener("resize", () => { layout(); render(); });
+(function init() {
+  layout();
+  const params = new URLSearchParams(location.hash.replace(/^#/, ""));
+  const t = Number(params.get("t"));
+  const span = Number(params.get("span"));
+  if (Number.isFinite(span) && span > 0) state.view = {t0: 0, t1: Math.min(duration, span)};
+  if (Number.isFinite(t) && t > 0) { state.t = t; centerOn(t); }
+  clampView();
+  render();
+})();
+</script>
+<script type="module">
+// Playfield rendering is delegated to replayviewer-js (bundled under web/replayviewer):
+// it parses the .osr/.osu and draws the gameplay, so no osr parsing happens here.
+import {
+  parseReplay, parseBeatmap, computeModDifficulty, applyStacking,
+  loadSkinFromDir, buildSkin, Renderer, Player, TimeMapper, AudioSync,
+} from "/web/replayviewer/index.js";
+
+const status = document.getElementById("pfStatus");
+const view = document.getElementById("playfield");
+let renderer = null;
+let drawnAt = -1e9;
+
+const info = document.getElementById("pfInfo");
+const {data: replayData, base: replayBase, cfg} = await window.__replayLoad;
+const audioUrl = replayData.assets.song;   // file name in the replay folder, or null
+const skinUrl = cfg.skin;                   // custom skin folder to merge over the default
+let audioSync = null;
+let audioContext = null;
+let audioReady = false;
+let statusBase = "";   // render line without the audio suffix, so it can be replaced
+let songVol = 0.7;
+let fxVol = 0.9;
+
+// Live volume sliders: they take effect immediately once the AudioSync exists.
+const volMusic = document.getElementById("volMusic");
+const volFx = document.getElementById("volFx");
+volMusic.addEventListener("input", () => { songVol = volMusic.value / 100; if (audioSync) audioSync.setSongVolume(songVol); });
+volFx.addEventListener("input", () => { fxVol = volFx.value / 100; if (audioSync) audioSync.setEffectsVolume(fxVol); });
+
+function drawAt(t) {
+  if (!renderer || Math.abs(t - drawnAt) < 8) return;
+  drawnAt = t;
+  renderer.renderFrameAt(t);
+}
+
+async function setupAudio(songBytes, skin, beatmap) {
+  try {
+    const songBuffer = await audioContext.decodeAudioData(songBytes);
+    audioSync = new AudioSync({
+      ctx: audioContext,
+      songBuffer,
+      skinSounds: skin.sounds || new Map(),
+      beatmapSounds: new Map(),
+      beatmapHitsounds: false,
+      hitResults: renderer.hitResults,
+      beatmap,
+      introOffsetMs: 0,
+      comboFrames: renderer.comboFrames,
+      userRate: window.__rate ? window.__rate.value : 1,
+    });
+    audioSync.setSongVolume(songVol);
+    audioSync.setEffectsVolume(fxVol);
+    audioReady = true;
+    status.textContent = statusBase + " · music + hitsounds";
+  } catch (err) {
+    console.warn("audio unavailable", err);
+    status.textContent = statusBase + " · audio failed";
+  }
+}
+
+async function boot() {
+  audioContext = new AudioContext();
+  const [osrBytes, osuText, skinBase, skinOverlay] = await Promise.all([
+    fetch(replayBase + replayData.assets.osr).then(r => r.arrayBuffer()),
+    fetch(replayBase + replayData.assets.beatmap).then(r => r.text()),
+    loadSkinFromDir("/web/skins/default", audioContext),
+    skinUrl ? loadSkinFromDir(skinUrl, audioContext) : Promise.resolve(null),
+  ]);
+  // The default skin is the fallback for anything the custom one omits - that covers
+  // both sprites and hitsounds, the same way osu! mixes a custom skin with its own.
+  const skin = skinOverlay ? buildSkin(skinBase, skinOverlay) : skinBase;
+  const replay = await parseReplay(osrBytes);
+  const beatmap = parseBeatmap(osuText);
+  const modDiff = computeModDifficulty(beatmap, replay);
+  applyStacking(beatmap, modDiff);
+  const timeMapper = new TimeMapper(replay.frames);
+  const player = new Player(timeMapper.presentationDurationMs);
+  renderer = new Renderer(view, player, replay, beatmap, skin, timeMapper, null, modDiff);
+  renderer.options.audioOffsetMs = 0;
+  // Cursor overlays (see drawCursorTrace / drawClickMarkers in web/replayviewer/index.js).
+  // cursorTraceMs is the fading path window; clickMarkerMs the ring fade after a press.
+  renderer.options.showCursorTrace = true;
+  renderer.options.cursorTraceMs = 600;
+  renderer.options.showSkinTrail = false;   // the skin's short 10-frame trail; our trace replaces it
+  renderer.options.showClickMarkers = true;
+  renderer.options.clickMarkerMs = 800;
+  renderer.options.clickMarkerShape = "x";   // "x" or "ring"
+  renderer.renderFrameAt(0);
+  window.onPlayfieldTime = drawAt;
+  statusBase = `replay render: ${replay.username} · ${replay.mode === 0 ? "osu!std" : "mode " + replay.mode}`
+    + (skinOverlay ? " · custom skin" : "");
+  status.textContent = statusBase + (audioUrl ? " · loading audio…" : " · no song file");
+  info.textContent = `${beatmap.artist} - ${beatmap.title} [${beatmap.version}]`;
+  if (audioUrl) {
+    fetch(replayBase + audioUrl)
+      .then(r => r.arrayBuffer())
+      .then(bytes => setupAudio(bytes, skin, beatmap))
+      .catch(err => { console.warn(err); status.textContent = statusBase + " · audio failed"; });
+  }
+}
+
+boot().catch(err => {
+  console.error(err);
+  status.textContent = "replay render unavailable: " + err;
+});
+
+// The timeline drives the audio: play/pause/seek, and it reads clock() while playing.
+window.__audio = {
+  async play(mapMs) {
+    if (!audioReady) return;
+    if (audioContext.state === "suspended") await audioContext.resume();
+    await audioSync.playFrom(mapMs);
+  },
+  pause() { if (audioReady) audioSync.pause(); },
+  seek(mapMs) { if (audioReady && audioSync.isPlaying) audioSync.seekTo(mapMs); },
+  clock() { return audioReady ? audioSync.currentTimeMs : null; },
+  // The engine's documented rate change: re-anchor, then restart in place so the song
+  // stays at the same position while the new slope takes effect.
+  async setRate(value) {
+    if (!audioReady) return;
+    audioSync.setUserRate(value);
+    if (audioSync.isPlaying) await audioSync.seekTo(audioSync.currentTimeMs);
+  },
+};
+</script>
+</body></html>

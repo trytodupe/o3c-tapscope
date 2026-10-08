@@ -1,0 +1,11 @@
+[project]
+name = "rapid-trigger"
+version = "0.1.0"
+description = "Native HID capture and osu! replay analysis for the SayoDevice O3C"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+dependencies = ["hidapi>=0.14.0"]
+
+[tool.uv]
+package = false

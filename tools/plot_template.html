@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><title>HID Time Series</title>
+<style>body{font:16px system-ui;margin:24px}canvas{width:100%;height:500px;border:1px solid #ccc}select,input{margin:8px;padding:6px}pre{white-space:pre-wrap}</style>
+<h1>HID raw value vs time</h1>
+<p>Depth is unverified. Offsets exclude report ID. No interpolation or millimeter calibration is assumed.</p>
+<label>Report ID <select id="report"></select></label>
+<label>Byte offset <input id="offset" type="number" min="0" value="0"></label>
+<label>Width <select id="width"><option value="1">uint8</option><option value="2">uint16 LE</option><option value="4">uint32 LE</option></select></label>
+<button id="draw">Plot</button><pre id="stats"></pre><canvas id="chart" width="1500" height="500"></canvas>
+<script>
+const reports = __CAPTURE_DATA__;
+const selector = document.getElementById('report');
+for (const reportId of new Set(reports.map(record => record[1]))) {
+  const option = document.createElement('option'); option.value = reportId; option.textContent = reportId; selector.append(option);
+}
+function draw() {
+  const rows = reports.filter(record => record[1] === Number(selector.value));
+  const offset = Number(document.getElementById('offset').value);
+  const width = Number(document.getElementById('width').value);
+  const stats = document.getElementById('stats');
+  if (!Number.isInteger(offset) || offset < 0 || rows.some(record => offset + width > record[2].length)) { stats.textContent = 'Field exceeds payload'; return; }
+  const points = rows.map(record => [record[0]/1000, record[2].slice(offset,offset+width).reduce((value,byte,index) => value + byte * 256 ** index,0)]);
+  const intervals = rows.slice(1).map((record,index) => record[0]-rows[index][0]).sort((first,second)=>first-second);
+  const varying = [];
+  for (let index=0; index<Math.min(...rows.map(record=>record[2].length));index++) if(new Set(rows.map(record=>record[2][index])).size>1) varying.push(index);
+  const values = points.map(point=>point[1]);
+  const minimum = Math.min(...values), maximum = Math.max(...values);
+  const duration = points.at(-1)[0]-points[0][0];
+  stats.textContent = `Reports: ${rows.length}; observed rate: ${duration ? ((rows.length-1)/duration).toFixed(2) : 'unknown'} Hz\nMedian delivery interval: ${intervals.length ? intervals[Math.floor(intervals.length/2)].toFixed(3) : 'unknown'} ms\nVarying byte offsets: ${varying.join(', ')}\nRaw range: ${minimum} .. ${maximum}`;
+  const canvas=document.getElementById('chart'), context=canvas.getContext('2d');
+  context.clearRect(0,0,canvas.width,canvas.height); context.font='16px system-ui';
+  context.fillText(`Time (s): ${points[0][0].toFixed(3)} .. ${points.at(-1)[0].toFixed(3)}`,80,480);
+  context.fillText(`Raw value: ${minimum} .. ${maximum}`,80,24);
+  context.strokeStyle='#1565c0';context.fillStyle='#1565c0';
+  for(const [timestamp,value] of points){const horizontal=80+(timestamp-points[0][0])/(duration||1)*1340;const vertical=440-(value-minimum)/(maximum-minimum||1)*390;context.beginPath();context.arc(horizontal,vertical,3,0,Math.PI*2);context.fill();}
+}
+document.getElementById('draw').onclick=draw;selector.onchange=draw;draw();
+</script></html>
