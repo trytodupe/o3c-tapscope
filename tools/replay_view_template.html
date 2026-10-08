@@ -17,6 +17,8 @@ a.back:hover{text-decoration:underline}
 label.spd{display:inline-flex;align-items:center;gap:6px;color:var(--dim);font-size:12.5px}
 label.spd input{font:inherit;padding:4px 6px;width:4.5em;background:#0b1016;color:var(--ink);
                 border:1px solid #38424d;border-radius:4px}
+label.spd select{font:inherit;padding:4px 6px;background:#0b1016;color:var(--ink);
+                 border:1px solid #38424d;border-radius:4px}
 label.vol{display:inline-flex;align-items:center;gap:6px;color:var(--dim);font-size:12.5px}
 label.vol input[type=range]{width:104px;accent-color:var(--accent);vertical-align:middle}
 canvas{display:block;width:100%}
@@ -56,6 +58,13 @@ pre b{color:var(--ink);font-weight:600}
   <label class="spd" for="speed">&times;<input id="speed" type="number" min="0.1" max="2" step="0.05" value="1.0"></label>
   <label class="vol">music <input id="volMusic" type="range" min="0" max="100" value="70"></label>
   <label class="vol">hitsound <input id="volFx" type="range" min="0" max="100" value="90"></label>
+  <label class="spd" for="quality">quality
+    <select id="quality">
+      <option value="auto">auto</option>
+      <option value="1">1x</option>
+      <option value="1.5">1.5x</option>
+      <option value="2">2x</option>
+    </select></label>
 </div>
 <canvas id="scrub"></canvas>
 <canvas id="chart"></canvas>
@@ -742,6 +751,17 @@ function setRate(value) {
 }
 speedInput.addEventListener("change", () => setRate(speedInput.value));
 speedButtons.forEach(button => button.addEventListener("click", () => setRate(button.dataset.rate)));
+const qualitySelect = document.getElementById("quality");
+{
+  const forced = new URLSearchParams(location.search).get("q");
+  qualitySelect.value = forced && qualitySelect.querySelector(`option[value="${forced}"]`) ? forced : "auto";
+  qualitySelect.addEventListener("change", () => {
+    const url = new URL(location.href);
+    if (qualitySelect.value === "auto") url.searchParams.delete("q");
+    else url.searchParams.set("q", qualitySelect.value);
+    location.href = url.toString();
+  });
+}
 window.addEventListener("keydown", event => {
   if (event.code === "Space") { event.preventDefault(); togglePlay(); }
   else if (event.code === "ArrowLeft") seek(state.t - (event.shiftKey ? 100 : stepMs() / 2), true);
@@ -763,6 +783,7 @@ function togglePlay() {
   }
 }
 let last = 0;
+let lastChart = 0;
 function tick(now) {
   if (!state.playing) return;
   const audioTime = window.__audio ? window.__audio.clock() : null;
@@ -773,8 +794,11 @@ function tick(now) {
     last = now;
     state.t = Math.min(duration, state.t + delta * rate.value);
   }
-  follow();
-  render();
+  // The playfield follows the audio clock every animation frame; the timeline only needs
+  // ~30 fps, and its full-canvas redraw would otherwise eat most of the frame budget.
+  // drawAt() ignores the follow-up call from draw() because the time has not moved.
+  if (typeof window.onPlayfieldTime === "function") window.onPlayfieldTime(state.t);
+  if (now - lastChart >= 32) { lastChart = now; follow(); render(); }
   if (state.t >= duration) { togglePlay(); return; }
   requestAnimationFrame(tick);
 }
@@ -803,6 +827,18 @@ const status = document.getElementById("pfStatus");
 const view = document.getElementById("playfield");
 let renderer = null;
 let drawnAt = -1e9;
+
+// The renderer sizes its backing store at devicePixelRatio * quality (capped at 3), which
+// on a scaled display is several times the visible pixels and dominates the frame cost.
+// Match the backing store to the displayed size instead, capped so the playfield stays
+// fast; "?q=<n>" from the quality select overrides it.
+function renderQuality() {
+  const forced = Number(new URLSearchParams(location.search).get("q"));
+  if (Number.isFinite(forced) && forced >= 0.5 && forced <= 3) return forced;
+  const dpr = window.devicePixelRatio || 1;
+  const width = view.clientWidth || 1280;
+  return Math.min(1.5, Math.max(1, dpr * width / 1280));
+}
 
 const info = document.getElementById("pfInfo");
 const {data: replayData, base: replayBase, cfg} = await window.__replayLoad;
@@ -869,7 +905,7 @@ async function boot() {
   applyStacking(beatmap, modDiff);
   const timeMapper = new TimeMapper(replay.frames);
   const player = new Player(timeMapper.presentationDurationMs);
-  renderer = new Renderer(view, player, replay, beatmap, skin, timeMapper, null, modDiff);
+  renderer = new Renderer(view, player, replay, beatmap, skin, timeMapper, null, modDiff, renderQuality());
   renderer.options.audioOffsetMs = 0;
   // Cursor overlays (see drawCursorTrace / drawClickMarkers in web/replayviewer/index.js).
   // cursorTraceMs is the fading path window; clickMarkerMs the ring fade after a press.

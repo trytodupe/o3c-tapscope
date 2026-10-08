@@ -173,6 +173,8 @@ uv run python tools/studio.py     # 打开 http://127.0.0.1:8770/ 在列表里�
 
 播放按钮 / 空格会同时播放**音乐和 hitsound**：引擎自带 `AudioSync`，歌曲由 studio 拷到那一局的目录（`song.<ext>`），hitsound 来自皮肤自带音（缺失的会合成），播放头由音频时钟驱动，拖动 / 缩放会把音频 seek 到对应时间。控制栏右侧有**播放倍速**（输入框 0.1–2.0，默认 1.0，左边是 0.25 / 0.5 / 0.75 / 1.0 快捷按钮）和 **music / hitsound 两个音量滑条**（实时生效，默认 70% / 90%）。浏览器的自动播放策略要求音频由用户手势启动，所以要先点一下 `> play`（或按空格）才有声音。
 
+playfield 的渲染分辨率默认按显示尺寸自动选（`devicePixelRatio × 显示宽度 / 1280`，上限 1.5），避免在高分屏或缩放显示上按 3x 后备缓冲拖垮帧率；控制栏最右的 **quality** 下拉可切 auto / 1x / 1.5x / 2x（记进 URL 的 `?q=`，想手动指定就用它）。播放时 playfield 跟随音频时钟每个动画帧重绘，时间线只在约 30 fps 更新。
+
 因为 playfield 用的是 ES module + `fetch` 加载皮肤，**不能直接 `file://` 打开**（浏览器会拦模块和 fetch），要从仓库根起服务；studio 自带 HTTP 服务，用 `python -m http.server` 也可以：
 
 ```powershell
