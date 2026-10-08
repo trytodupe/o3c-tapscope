@@ -4,7 +4,7 @@ SayoDevice O3C 的磁轴深度采集、主机按键同钟录制与 osu! replay �
 
 ## Quick start
 
-需要：Windows、[uv](https://docs.astral.sh/uv/)、一块 SayoDevice O3C、osu!stable，以及可选的 [tosu](https://github.com/Kanawanagasaki/tosu)（装在 `http://127.0.0.1:24050`，用来给对齐提供粗锚点）。
+需要：Windows、[uv](https://docs.astral.sh/uv/)、osu!stable、可选的 [tosu](https://github.com/Kanawanagasaki/tosu)（装在 `http://127.0.0.1:24050`，给对齐提供粗锚点），以及一台 SayoDevice O3C（**只在录实时深度时需要；单纯看 replay 不需要**）。
 
 ```powershell
 git clone <repo> ; cd rapid-trigger
@@ -12,7 +12,14 @@ uv sync
 uv run python tools/studio.py          # 打开 http://127.0.0.1:8770/
 ```
 
-第一次打开后在页面 **settings** 里填 **osu! folder**（如 `D:\osu!`，Songs / Replays / Skins 都从它派生）、每个键的名字与 **RT 区间**（low/high，mm），保存后**重启 studio** 生效。之后点 **Start capture** 录制，导出一局的 `.osr`，studio 会自动 stage 并在 **aligned replays** 里给出链接。设置存在 `output/settings.json`（不入库）；`--osu` / `--port` / `--skin` 等命令行参数可临时覆盖。osu!lazer 暂不支持。
+第一次打开后在页面 **settings** 里填 **osu! folder**（如 `D:\osu!`，Songs / Replays / Skins 都从它派生）和每个键的名字与 **RT 区间**（low/high，mm），保存后**重启 studio** 生效。
+
+之后就两条互不影响的用法：
+
+- **看一局已有的 replay（最常用）**：在 **view a replay** 区块选一个 `.osr`（来自 `<osu!>\Replays`）和一个 capture（默认就是刚结束的那次录制），点 **Align & open** 即打开时间线。这条路径**不需要 tosu、不需要 watcher、也不需要插着 O3C**。
+- **边打边录**：点 **Start capture** 录实时深度；导出的 `.osr` 落进 `<osu!>\Replays` 后 watcher 自动 align 并出现在 **aligned replays**。tosu 开着会用它做对齐的粗锚点，没开则只按按键序列对齐（可用 `--no-tosu` / `--no-watch` 关掉这两个自动行为）。
+
+设置存在 `output/settings.json`（不入库）；`--osu` / `--port` / `--skin` 等命令行参数可临时覆盖。osu!lazer 暂不支持。
 
 ## 磁轴深度采集（协议已确认）
 
@@ -119,7 +126,7 @@ uv run python tools/game_state.py --out state.jsonl --duration 60   # 只记录�
 
 ## 采集控制台（studio）
 
-`tools/studio.py` 把「实时深度 + 采集开关 + 回放监听 + replay 查看」合成一个常驻进程：浏览器里 Start/Stop 采集，`<osu!>\Replays` 出现新的 `.osr` 就自动对齐并给出链接。它是**唯一的设备持有者**，所以不要和 `live_depth.py` 同时开；采集只发已确认的只读 `0x14` 帧。页面的 **settings** 就是全部配置（osu! 路径、每键名字/RT、设备、tosu、皮肤、端口、窗口分钟数），改动**重启后生效**。
+`tools/studio.py` 把「实时深度 + 采集开关 + 手动/自动 replay 对齐 + replay 查看」合成一个常驻进程：浏览器里 Start/Stop 采集；要么在 **view a replay** 里手选 `.osr` + capture 点 **Align & open**，要么让 watcher 在 `<osu!>\Replays` 出现新 `.osr` 时自动对齐。它是**唯一的设备持有者**，所以不要和 `live_depth.py` 同时开；采集只发已确认的只读 `0x14` 帧。页面的 **settings** 就是全部配置（osu! 路径、每键名字/RT、设备、tosu、皮肤、端口、窗口分钟数），改动**重启后生效**。tosu 和 watcher 都只是自动化的锦上添花（`--no-tosu` / `--no-watch` 可关），手动 align 一局完全不依赖它们。
 
 ```powershell
 uv run python tools/game_state.py --probe    # 可选：先确认 tosu 在应答（粗对齐靠它）
@@ -143,8 +150,10 @@ uv run python tools/studio.py                # 打开 http://127.0.0.1:8770/
 | `--tosu-url` | settings `http://127.0.0.1:24050` | 临时覆盖状态读取器地址 |
 | `--state-poll-ms` | `50` | 我们自己多久采一次状态（不改变 tosu 值的新鲜度） |
 | `--window-min` | settings `10` | 临时覆盖 Start 按钮的默认窗口（分钟，`0` = 不限，上限 120） |
+| `--no-watch` | | 不自动监听新 `.osr`（页面里仍可手动 align 一局） |
+| `--no-tosu` | | 不轮询 tosu，只按按键序列对齐 |
 
-页面还显示实时三条深度条、设备/tosu/监听状态，以及已对齐回放的列表（来自 `output/replays/replays.json`，跨重启保留）。HTTP 接口：`GET /api/status`、`GET /api/pages`、`GET /api/settings`、`POST /api/settings`、`POST /api/pick-folder`、`POST /api/start?window_min=<分钟>`、`POST /api/stop`、`GET /events`（SSE 实时深度）。静态文件以仓库根为文档根，所以共享 shell 能直接用 `/web/replayviewer/...` 和 `/output/skin/...`。
+页面还显示实时三条深度条、设备/tosu/监听状态，以及已对齐回放的列表（来自 `output/replays/replays.json`，跨重启保留）。HTTP 接口：`GET /api/status`、`GET /api/pages`、`GET /api/sources`、`GET /api/settings`、`POST /api/settings`、`POST /api/pick-folder`、`POST /api/view`、`POST /api/start?window_min=<分钟>`、`POST /api/stop`、`GET /events`（SSE 实时深度）。静态文件以仓库根为文档根，所以共享 shell 能直接用 `/web/replayviewer/...` 和 `/output/skin/...`。
 
 ## 时间线视图（replay + 按键深度）
 

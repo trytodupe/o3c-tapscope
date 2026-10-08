@@ -380,22 +380,56 @@ class Studio:
         }
 
     def handle_replay(self, osr_path):
-        """Align one exported replay against the session capture it just ended."""
+        """Auto path: align an exported replay against the session that just ended."""
         with self.lock:
             capture = self.capture_path
         if capture is None:
             self._set_watch(f"{osr_path.name}: no capture recorded yet")
             return
-        slug = f"{time.strftime('%Y%m%d-%H%M%S')}-{osr_path.stem}"
         self._set_watch(f"aligning {osr_path.name}…")
         try:
-            entry = self.render(osr_path, capture, slug)
+            self.stage(osr_path, capture)
         except Exception as error:  # a bad replay must not kill the watcher
             self._set_watch(f"{osr_path.name}: {error}")
             return
+        self._set_watch(f"{osr_path.name} aligned")
+
+    def stage(self, osr_path, capture_path):
+        """Align one replay against one capture, list it and return the entry."""
+        slug = f"{time.strftime('%Y%m%d-%H%M%S')}-{osr_path.stem}"
+        entry = self.render(osr_path, capture_path, slug)
         entry.setdefault("url", SHELL_URL + "?id=" + urllib.parse.quote(entry["id"], safe=""))
         self.store.add(entry)
-        self._set_watch(f"{osr_path.name} aligned")
+        return entry
+
+    def sources(self):
+        """What the manual "view a replay" picker can offer."""
+        with self.lock:
+            current = Path(self.capture_path).name if self.capture_path else ""
+        return {
+            "osu_root": self.settings.get("osu_root", ""),
+            "replays": _file_list(self.watch_dir, "*.osr"),
+            "captures": _file_list(self.captures_dir, "*.jsonl"),
+            "current_capture": current,
+        }
+
+    def view(self, osr_name, capture_name):
+        """Manual path: align a hand-picked replay against a hand-picked capture.
+
+        No tosu and no watcher involved - the whole point is that a replay plus a tap
+        capture on disk is enough to produce a timeline page.
+        """
+        osr_path = _contained(self.watch_dir, osr_name, ".osr")
+        if osr_path is None:
+            raise ValueError("pick a replay from the list")
+        if capture_name:
+            capture_path = _contained(self.captures_dir, capture_name, ".jsonl")
+        else:
+            with self.lock:
+                capture_path = self.capture_path
+        if capture_path is None:
+            raise ValueError("pick a capture from the list")
+        return self.stage(osr_path, capture_path)["url"]
 
     def _set_watch(self, text):
         with self.lock:
@@ -423,6 +457,8 @@ class StudioHandler(SimpleHTTPRequestHandler):
             return self.send_json({"pages": self.studio.status()["pages"]})
         if path == "/api/settings":
             return self.send_json(self.studio.settings or {})
+        if path == "/api/sources":
+            return self.send_json(self.studio.sources())
         if path in ("/", "/index.html"):
             return self.send_page()
         return super().do_GET()
@@ -441,6 +477,13 @@ class StudioHandler(SimpleHTTPRequestHandler):
             return self.send_json({"ok": True, "restart_required": True, "settings": saved})
         if parsed.path == "/api/pick-folder":
             return self.send_json({"path": pick_directory()})
+        if parsed.path == "/api/view":
+            payload = self.read_json()
+            try:
+                url = self.studio.view(payload.get("osr", ""), payload.get("capture", ""))
+            except Exception as error:  # a bad pick must not kill the server
+                return self.send_json({"ok": False, "error": str(error)})
+            return self.send_json({"ok": True, "url": url})
         self.send_response(404)
         self.end_headers()
 
@@ -485,6 +528,26 @@ class StudioHandler(SimpleHTTPRequestHandler):
                 time.sleep(delay)
         except (BrokenPipeError, ConnectionResetError, OSError):
             return
+
+
+def _file_list(folder, pattern):
+    """Files directly in ``folder`` matching ``pattern``, newest first."""
+    if not folder:
+        return []
+    try:
+        files = [path for path in Path(folder).glob(pattern) if path.is_file()]
+    except OSError:
+        return []
+    files.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+    return [{"name": path.name, "mtime": path.stat().st_mtime} for path in files]
+
+
+def _contained(folder, name, suffix):
+    """A file strictly inside ``folder`` with ``suffix``, or None (no path traversal)."""
+    if not folder or not name or Path(name).name != name or not name.lower().endswith(suffix):
+        return None
+    path = Path(folder) / name
+    return path if path.is_file() else None
 
 
 def pick_directory():
@@ -554,6 +617,10 @@ def main():
     parser.add_argument("--state-poll-ms", type=float, default=50.0)
     parser.add_argument("--window-min", type=float,
                         help="override the saved capture window in minutes (0 keeps everything)")
+    parser.add_argument("--no-watch", action="store_true",
+                        help="do not auto-align new .osr files (the page can still align one)")
+    parser.add_argument("--no-tosu", action="store_true",
+                        help="do not poll tosu; align from the press sequence alone")
     parser.add_argument("--no-open", action="store_true")
     args = parser.parse_args()
 
@@ -645,17 +712,25 @@ def main():
             record[key] = state[key]
         recorder.write(record)
 
-    runs = PlayRuns(recorder, args.state_poll_ms)
-    poller = StatePoller(emit_state, url=args.tosu_url, poll_ms=args.state_poll_ms, stop=stop)
-    studio.poller = poller
-    threads.append(poller)
+    if not args.no_tosu:
+        runs = PlayRuns(recorder, args.state_poll_ms)
+        poller = StatePoller(emit_state, url=tosu_url, poll_ms=args.state_poll_ms, stop=stop)
+        studio.poller = poller
+        threads.append(poller)
+    else:
+        print("tosu       : off (alignment uses the press sequence only)")
 
     for thread in threads:
         thread.start()
     hook.installed.wait(timeout=2.0)
 
-    watcher = ReplayWatcher(watch_dir)
-    watcher.prime()
+    studio.watch_dir = str(watch_dir)
+    watcher = None
+    if args.no_watch:
+        studio.watch_status = "watcher off (align a replay from the page)"
+    else:
+        watcher = ReplayWatcher(watch_dir)
+        watcher.prime()
     studio.watch_dir = str(watch_dir)
 
     StudioHandler.studio = studio
@@ -673,7 +748,10 @@ def main():
     url = f"http://127.0.0.1:{port}/"
     print(f"studio     : {url}")
     print(f"osu        : {settings['osu_root'] or '(not set - edit it in the web UI)'}")
-    print(f"replays    : watching {watch_dir}")
+    if args.no_watch:
+        print(f"replays    : {watch_dir} (watcher off - align from the page)")
+    else:
+        print(f"replays    : watching {watch_dir}")
     print(f"captures   : {args.captures}")
     if skin_url:
         print(f"skin       : {skin_url}")
@@ -686,8 +764,9 @@ def main():
                 studio.handle_replay(path)
             stop.wait(1.0)
 
-    watcher_thread = threading.Thread(target=watch_loop, daemon=True)
-    watcher_thread.start()
+    if watcher is not None:
+        watcher_thread = threading.Thread(target=watch_loop, daemon=True)
+        watcher_thread.start()
 
     try:
         server.serve_forever()

@@ -179,6 +179,37 @@ class StudioTests(unittest.TestCase):
         self.assertIn("boom", studio.status()["watch"]["status"])
         self.assertEqual(studio.status()["pages"], [])
 
+    def test_manual_view_aligns_a_picked_replay_and_capture(self):
+        calls = []
+
+        def render(osr, capture, slug):
+            calls.append((Path(osr).name, Path(capture).name))
+            return {"id": slug, "name": Path(osr).name}
+
+        studio = self._studio(render)
+        studio.watch_dir = str(studio.captures_dir)
+        (studio.captures_dir / "a.osr").write_bytes(b"")
+        (studio.captures_dir / "tap.jsonl").write_text("", encoding="utf-8")
+        url = studio.view("a.osr", "tap.jsonl")
+        self.assertEqual(calls, [("a.osr", "tap.jsonl")])
+        self.assertIn("id=", url)
+        self.assertEqual(studio.status()["pages"][0]["name"], "a.osr")
+
+    def test_manual_view_rejects_a_path_outside_the_folder(self):
+        studio = self._studio(lambda *_: None)
+        studio.watch_dir = str(studio.captures_dir)
+        with self.assertRaises(ValueError):
+            studio.view("../secret.osr", "tap.jsonl")
+
+    def test_sources_list_replays_and_captures_newest_first(self):
+        studio = self._studio(lambda *_: None)
+        studio.watch_dir = str(studio.captures_dir)
+        (studio.captures_dir / "a.osr").write_bytes(b"")
+        (studio.captures_dir / "tap.jsonl").write_text("", encoding="utf-8")
+        sources = studio.sources()
+        self.assertEqual([item["name"] for item in sources["replays"]], ["a.osr"])
+        self.assertEqual([item["name"] for item in sources["captures"]], ["tap.jsonl"])
+
 
 class ReplayStoreTests(unittest.TestCase):
     def test_entries_survive_a_reload(self):
