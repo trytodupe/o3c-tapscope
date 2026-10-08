@@ -389,7 +389,7 @@ class Studio:
         self._set_watch(f"aligning {osr_path.name}…")
         try:
             self.stage(osr_path, capture)
-        except Exception as error:  # a bad replay must not kill the watcher
+        except (Exception, SystemExit) as error:  # a bad replay must not kill the watcher
             self._set_watch(f"{osr_path.name}: {error}")
             return
         self._set_watch(f"{osr_path.name} aligned")
@@ -481,7 +481,7 @@ class StudioHandler(SimpleHTTPRequestHandler):
             payload = self.read_json()
             try:
                 url = self.studio.view(payload.get("osr", ""), payload.get("capture", ""))
-            except Exception as error:  # a bad pick must not kill the server
+            except (Exception, SystemExit) as error:  # SystemExit is a BaseException
                 return self.send_json({"ok": False, "error": str(error)})
             return self.send_json({"ok": True, "url": url})
         self.send_response(404)

@@ -54,6 +54,25 @@ class FindBeatmapTests(unittest.TestCase):
             found = find_beatmap(file_hash(chart), root, terms=["nothing-matches-here"])
         self.assertEqual(found, chart)
 
+    def test_punctuation_differences_do_not_hide_the_folder(self):
+        # The replay says "vs." while the song folder says "vs"; matching whole phrases
+        # used to score 0 for every folder and fall through to a capped full scan.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            decoy = root / "0000 Aaa - Nothing Here"
+            decoy.mkdir()
+            (decoy / "map.osu").write_text(BEATMAP, encoding="utf-8")
+            folder = root / "1889111 -45 - yoshikawa45 vs siesta45 Battle of HongKong"
+            folder.mkdir()
+            chart = folder / "-45 - yoshikawa45 vs. siesta45 Battle of HongKong (Dada) [Para Bellum].osu"
+            chart.write_text(BEATMAP, encoding="utf-8")
+            terms = filename_terms(
+                "[SHK]trytodupe - -45 - yoshikawa45 vs. siesta45 Battle of HongKong "
+                "[Para Bellum] (2026-10-08) Osu.osr"
+            )
+            found = find_beatmap(file_hash(chart), root, terms=terms, max_folders=1)
+        self.assertEqual(found, chart)
+
 
 class ReplayNameTests(unittest.TestCase):
     def test_terms_keep_artist_and_title(self):

@@ -40,23 +40,32 @@ def filename_terms(name):
     return [term for term in terms if len(term) >= 4]
 
 
+def _words(text):
+    """Alphanumeric words, so punctuation cannot decide whether a folder matches.
+
+    A replay name says ``yoshikawa45 vs. siesta45`` while the song folder says
+    ``yoshikawa45 vs siesta45``; comparing whole phrases made every folder score 0.
+    """
+    return set(re.findall(r"[a-z0-9]+", text.lower()))
+
+
 def find_beatmap(beatmap_hash, songs_root, terms=(), max_folders=400):
     """Return the ``.osu`` whose MD5 matches ``beatmap_hash``, or None.
 
-    Folders matching more hint terms are hashed first, so the common case (one song
+    Folders sharing more hint words are hashed first, so the common case (one song
     folder matches the artist and title) reads a handful of files instead of the
     whole library.
     """
     songs_root = Path(songs_root)
     if not songs_root.is_dir():
         raise SystemExit(f"Songs folder not found: {songs_root}")
+    wanted = _words(" ".join(terms))
     ranked = []
     for folder in songs_root.iterdir():
         if not folder.is_dir():
             continue
-        name = folder.name.lower()
-        score = sum(1 for term in terms if term in name)
-        if terms and not score:
+        score = len(wanted & _words(folder.name)) if wanted else 0
+        if wanted and not score:
             continue
         ranked.append((score, folder))
     ranked.sort(key=lambda item: (-item[0], item[1].name))
