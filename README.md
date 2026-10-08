@@ -1,4 +1,4 @@
-# Rapid Trigger Capture
+# O3C Tapscope
 
 SayoDevice O3C 的磁轴深度采集、主机按键同钟录制与 osu! replay 对齐。**仅支持 Windows**；采集器只发送已确认的只读轮询帧，不写配置、不校准、不更新固件。第三方组件（含修改过的 replayviewer-js）见 `THIRD_PARTY.md`。
 
@@ -7,7 +7,7 @@ SayoDevice O3C 的磁轴深度采集、主机按键同钟录制与 osu! replay �
 需要：Windows、[uv](https://docs.astral.sh/uv/)、osu!stable **或** osu!lazer（只有 lazer 也能看 replay / 录实时深度，见下）、可选的 [tosu](https://github.com/Kanawanagasaki/tosu)（装在 `http://127.0.0.1:24050`，给对齐提供粗锚点；对 lazer 不一定有效），以及一台 SayoDevice O3C（**只在录实时深度时需要；单纯看 replay 不需要**）。
 
 ```powershell
-git clone <repo> ; cd rapid-trigger
+git clone <repo> ; cd o3c-tapscope
 uv sync
 uv run python tools/studio.py          # 打开 http://127.0.0.1:8770/
 ```

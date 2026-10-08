@@ -61,7 +61,7 @@ wheels = [
 ]
 
 [[package]]
-name = "rapid-trigger"
+name = "o3c-tapscope"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
