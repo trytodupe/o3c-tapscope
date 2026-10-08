@@ -19,7 +19,7 @@ uv run python tools/studio.py          # 打开 http://127.0.0.1:8770/
 - **看一局已有的 replay（最常用）**：在 **view a replay** 区块点 **Browse…** 弹出系统文件对话框选一个 `.osr`（默认目录是 stable `Replays`，也可以选 lazer `exports` 里的，或直接粘贴绝对路径），再选一个 capture（默认就是刚结束的那次录制），点 **Align & open** 即打开时间线。这条路径**不需要 tosu、不需要 watcher、也不需要插着 O3C**。
 - **边打边录**：点 **Start capture** 录实时深度；导出的 `.osr` 落进 `<osu!>\Replays` 后 watcher 自动 align 并出现在 **aligned replays**。tosu 开着会用它做对齐的粗锚点，没开则只按按键序列对齐（可用 `--no-tosu` / `--no-watch` 关掉这两个自动行为）。
 
-设置存在 `output/settings.json`（不入库）；`--osu` / `--lazer` / `--port` / `--skin` 等命令行参数可临时覆盖。osu!lazer 的 replay 可以查看（见下），但不参与实时采集。
+设置存在 `output/settings.json`（不入库）；`--osu` / `--lazer` / `--port` / `--skin` 等命令行参数可临时覆盖。osu!lazer 的 replay 同样可以查看与录制（见下）。
 
 ## 磁轴深度采集（协议已确认）
 
@@ -65,7 +65,7 @@ uv run python tools/hid_capture.py --vid 0x8089 --pid 0x0009 --out capture-nativ
 
 O3C 枚举出的厂商通道：`Col01`（usage page `0xFF00`）、`Col02`（`0xFF11`，report `0x21`，1 Hz 心跳，不含深度）、`Col03`（`0xFF12`，report `0x22`，磁轴电平通道）。`report_id` 是原始报告的第一个字节，native 输出的 `hex` 包含 report ID；`host_ns` 是高精度单调时钟。按 Ctrl+C 正常结束会写入 `end` 记录。
 
-Web HID 页面（`web/`）仍可用于快速确认浏览器能看到哪些接口，但不再是正式采集路径：它读不到被浏览器保护的键盘接口，报告时间也只代表浏览器收到事件的时刻。
+Web HID 页面（`web/`）用于快速确认浏览器能看到哪些接口：它读不到被浏览器保护的键盘接口，报告时间也只代表浏览器收到事件的时刻。
 
 ```powershell
 python -m http.server 8765 --bind 127.0.0.1 --directory web
@@ -84,7 +84,7 @@ uv run python tools/plot_depth.py output/session/aligned.jsonl --out depth-align
 
 支持经典二进制 `.osr` 的 LZMA frame 数据，osu!stable 与 osu!lazer 导出的 `.osr` 是同一格式；不自动处理 DT/HT 的时间比例。
 
-### 手工锚点（旧路径）
+### 手工锚点（`analyze.py`）
 
 `tools/analyze.py` 保留人工锚点对齐，使用只读的 replay frame 时间坐标。建议至少三个锚点分布在整局，并保留额外事件做独立验证；单个锚点只能确定偏移，两个锚点无法提供有意义的残差检验。
 
@@ -104,10 +104,10 @@ python tools/analyze.py capture.jsonl --replay play.osr --anchors anchors.csv --
 
 replay 只有谱面时间，采集只有主机时间，两者差一个未知偏移。纯靠按键序列搜索这个偏移在密集谱面上是够用的，但它没有先验：同一段按键序列可能在好几个偏移上都匹配得不错，而错的那些会静默地给出一个「看起来合理」的结果。社区状态读取器正好补上这个先验——它知道当前正在播放的谱面时间。
 
-- 工具用 [tosu](https://github.com/tosuapp/tosu)（gosumemory 的维护版后继，OBS 上的 osu 悬浮层大多读它）。本地 HTTP，无需鉴权：`GET http://127.0.0.1:24050/json/v2`，谱面时间在 `beatmap.time.live`，播放状态在 `state.number`（`2` = playing），另外还有 `beatmap.checksum` 可以核对是不是同一张图。旧 gosumemory 的 v1 结构（`gameplay.time.live` / `menu.state`，路径 `/json`）也接受。
+- 工具用 [tosu](https://github.com/tosuapp/tosu)（gosumemory 的维护版后继，OBS 上的 osu 悬浮层大多读它）。本地 HTTP，无需鉴权：`GET http://127.0.0.1:24050/json/v2`，谱面时间在 `beatmap.time.live`，播放状态在 `state.number`（`2` = playing），另外还有 `beatmap.checksum` 可以核对是不是同一张图。gosumemory v1 的结构（`gameplay.time.live` / `menu.state`，路径 `/json`）也接受。
 - 精度：`beatmap.time.live` 来自 tosu 的**精确循环**（`PRECISE_DATA_POLL_RATE`，默认 10 ms、最小 1 ms），不是慢速的 `POLL_RATE`（默认 150 ms，那个管其余字段），也**不是**每次请求现读内存（源码：`updatePreciseState()` 里 `playTime = memory.globalPrecise().time`，`/json/v2` 直接读它）。所以一次采样最多过一个精确周期，`host - map` 整体偏大。采集器取「每个不同 map 值的**首次**观测」的下分位作为锚点，误差因此是**精确周期**量级（约 10 ms）；报告里的 `stale_ms` 就是实测的过时量，`rate` 是主机钟与谱面钟的斜率（应当 ≈ 1）。`--state-poll-ms` 只决定我们自己多久采一次，不改变 tosu 值的新鲜度。
 - 锚点只是先验：窗口内搜索与无约束搜索各跑一次，**按匹配数排序，平局才归锚点**。干净的采集在真偏移上能匹配上每一次按键，别的偏移不可能更多，所以这个裁决是安全的；锚点被否掉时会明确打印出来，提醒你读取器看到的是别的图或者时钟不对。
-- 不装 tosu 也能用：不加 `--state-url` 时行为与以前完全一致，一条网络请求都不发。
+- 不装 tosu 也能用：不加 `--state-url` 时一条网络请求都不发，只按按键序列对齐。
 
 ```powershell
 uv run python tools/game_state.py --probe                    # 确认读取器应答、看到哪张图
@@ -158,15 +158,15 @@ uv run python tools/studio.py                # 打开 http://127.0.0.1:8770/
 
 ## 时间线视图（replay + 按键深度）
 
-replay 视图不再每局生成一份 HTML，而是**一个共享 shell**（`output/replay.html`，由 studio 每次启动从 `tools/replay_view_template.html` 重写）+ 每局一个数据目录 `output/replays/<id>/`（`payload.json` 加它自己的 `replay.osr` / `beatmap.osu` / `song.<ext>`）。shell 从 `?id=` 得知看哪一局，`fetch` 那份 `payload.json` 再渲染。改一次模板只要重启 studio，所有 replay 立即是新视图。
+replay 视图是**一个共享 shell**（`output/replay.html`，由 studio 每次启动从 `tools/replay_view_template.html` 重写）+ 每局一个数据目录 `output/replays/<id>/`（`payload.json` 加它自己的 `replay.osr` / `beatmap.osu` / `song.<ext>`）。shell 从 `?id=` 得知看哪一局，`fetch` 那份 `payload.json` 再渲染。改一次模板只要重启 studio，所有 replay 立即是新视图。
 
-`tools/replay_view.py` 的 `stage_replay()` 负责算数据、写 `payload.json`、拷资源；studio 在 `.osr` 落定、且**知道它对应哪份采集**的那一刻调用它，所以时钟对齐的 offset 直接固化进数据，查看时不再重算。`output/replays/replays.json` 是列表清单（studio 页的 aligned replays），跨重启保留；老的单页 HTML 已不再生成。
+`tools/replay_view.py` 的 `stage_replay()` 负责算数据、写 `payload.json`、拷资源；studio 在 `.osr` 落定、且**知道它对应哪份采集**的那一刻调用它，所以时钟对齐的 offset 直接固化进数据，查看时无需重算。`output/replays/replays.json` 是列表清单（studio 页的 aligned replays），跨重启保留。
 
 顶部 playfield 渲染交给 [replayviewer-js](https://github.com/daladal/replayviewer-js)（装在 `web/replayviewer/`，默认皮肤 `web/skins/default/` 来自该仓库），它自己 parse `.osr` / `.osu`、判分、画 hitcircle / approach circle / slider / 光标 / HUD，随播放头同步——**本仓库不自己 parse osr 来渲染**。shell 只从那一局的目录取 `replay.osr` / `beatmap.osu`。
 
 **皮肤**在 studio 的 settings 里选（或 `--skin` 临时覆盖）：皮肤会拷到 `output/skin/` 并生成 `index.json`（`loadSkinFromDir` 的清单），页面把它叠在默认皮肤上加载——**视觉和 hitsound 一起生效**，默认皮肤只作缺项回退。osu! 皮肤常把数字放在子目录（`HitCirclePrefix: numbers/default`），所以清单保留相对路径。皮肤是全局的，所有 replay 共用一份。
 
-每个键的 **RT 区间**来自 studio 的实时设置（`/api/settings`），所以在 UI 改完并重启后，**已 stage 的旧 replay 也立即跟着变**；`payload.json` 里存的那份只是脱离 studio（静态服务）时的快照。
+每个键的 **RT 区间**来自 studio 的实时设置（`/api/settings`），所以在 UI 改完并重启后，**已 stage 的 replay 也立即跟着变**；`payload.json` 里存的那份只是脱离 studio（静态服务）时的快照。
 
 ```powershell
 uv run python tools/studio.py     # 打开 http://127.0.0.1:8770/ 在列表里选一局
@@ -204,7 +204,7 @@ uv run python tools/replay_view.py "D:\osu!\Replays\play.osr" --capture tap.json
 
 ### osu!lazer
 
-lazer 导出的 `.osr` 与 stable 是同一套二进制格式，所以帧、mods、谱面 MD5 都照旧。变的是**文件的存放方式**：lazer 把每一次 import 的文件按内容 SHA-256 存进 `files/<sha256[:1]>/<sha256[:2]>/<sha256>`，既不保留原文件名也没有 `Songs/<set>/` 目录。于是按 MD5 找谱面只能先嗅每个 blob 是不是 `.osu`（首行 `osu file format`），再对命中的算 MD5；这个 MD5 索引在进程内缓存，首次扫描大约几秒，之后即时，miss 时重建以吸收运行中新 import 的图。
+lazer 导出的 `.osr` 与 stable 是同一套二进制格式，所以帧、mods、谱面 MD5 都一样。变的是**文件的存放方式**：lazer 把每一次 import 的文件按内容 SHA-256 存进 `files/<sha256[:1]>/<sha256[:2]>/<sha256>`，既不保留原文件名也没有 `Songs/<set>/` 目录。于是按 MD5 找谱面只能先嗅每个 blob 是不是 `.osu`（首行 `osu file format`），再对命中的算 MD5；这个 MD5 索引在进程内缓存，首次扫描大约几秒，之后即时，miss 时重建以吸收运行中新 import 的图。
 
 用法：settings 里新增 **osu!lazer folder**（填到 `D:\osulazer` 这一层，不是 `files`），重启后 studio 的 **view a replay** 文件对话框默认会从 stable `Replays` 打开，同时也可以选 lazer 的 `exports`（或任何位置的 `.osr`，也可直接粘贴绝对路径）；选一局 + 一个 capture 点 **Align & open** 即可，和 stable 完全一样。`/api/sources` 仍会把两边的新 replay 一起列出来，仅用于“最新一局”的默认预填。
 
@@ -221,7 +221,7 @@ notes  : 554  press pairs: 125  stray presses: 5  unhit notes: 2
 stopped: frames end at 40.0 s (28% of the map); 427 notes were never played
 ```
 
-完整一把不会有 `stopped:` 那一行（`complete` 为 true，输出与以前逐字节相同）。边界情况：fail 得太早（几乎没按键）时按键序列不足以定出 offset，`replay_view.py` 会以 `Capture and replay do not share any press sequence` 退出，studio 把这句话显示在状态栏。
+完整一把不会有 `stopped:` 那一行（`complete` 为 true）。边界情况：fail 得太早（几乎没按键）时按键序列不足以定出 offset，`replay_view.py` 会以 `Capture and replay do not share any press sequence` 退出，studio 把这句话显示在状态栏。
 
 ### 标定
 
@@ -231,7 +231,7 @@ stopped: frames end at 40.0 s (28% of the map); 427 notes were never played
 mm(level) = 0.05 * level
 ```
 
-`cmd 0x14` 那张每键 80 项的表是出厂拟合，现在只作参考记录、不参与换算（`tools/calibration.example.json` 是键名与 `step_um` 的种子）。**键名和每键 RT 区间现在是 studio 的 Web UI 设置**（`output/settings.json`），图上按每个键画各自的两条 RT 线（`replay_view.py` 的 `--rt-range-mm` 可临时广播覆盖）。刻度是常量，所以不需要为了换算去读设备：
+`cmd 0x14` 那张每键 80 项的表是出厂拟合，只作参考记录、不参与换算（`tools/calibration.example.json` 是键名与 `step_um` 的种子）。**键名和每键 RT 区间由 studio 的 Web UI 设置**（`output/settings.json`），图上按每个键画各自的两条 RT 线（`replay_view.py` 的 `--rt-range-mm` 可临时广播覆盖）。刻度是常量，所以不需要为了换算去读设备：
 
 ```powershell
 # 可选：只读地导出设备出厂表作参考（不参与 mm 换算）
@@ -253,7 +253,7 @@ uv run python tools/plot_depth.py tap.jsonl --out depth.html --threshold 6,4,8 -
 - 已确认可用的读取命令：`0x14`（逐键信息块，`payload[8]` 是该键实时电平，index 0..2；采集器/实时图走这条）、`0x15`（实时电平广播，一次含三个字节，但只有被逐键读刷新过的通道是新的）、`0x10`（逐键配置，index 0..5）、`0x19`（分段读键索引，index 0..3）。
 - https://github.com/Sayobot/sayo-device-web-hid 的默认分支主要是 Angular 模板，没有磁轴解析；https://github.com/Sayobot/SayoDevice_Web 是旧配置器，不能据此推定 O3C 新版协议。
 - https://sayodevice.com/pkg/sayo_lib_rs.js 暴露 `AnalogKeyInfo`、`AnalogKeyInfo2`、`BroadCastData`，WASM 字符串表给出 `raw_um`、`zero_pos`、`trigger_level`、`release_level` 等字段名，但离线驱动它需要重建 flutter_rust_bridge 的 wire 编码。
-- 待办：用真实对局数据验证双击判据；osu!lazer 只支持「看 replay」，实时采集仍走 stable。
+- 待办：用真实对局数据验证双击判据；lazer 的自动 watcher 粗锚点（tosu）不保证可用，建议手动 align。
 - 采到的原始 NDJSON 可用 `python tools/inspect_capture.py <file>` 检查请求、报告频率及变化字节。
 
 ## License
