@@ -69,6 +69,9 @@ pre b{color:var(--ink);font-weight:600}
 <canvas id="scrub"></canvas>
 <canvas id="chart"></canvas>
 <pre id="readout"></pre>
+<div id="stats" style="position:fixed;right:8px;bottom:8px;display:none;padding:4px 8px;
+  font:12px ui-monospace,Consolas,monospace;color:#8b98a5;background:rgba(11,16,22,.85);
+  border:1px solid #2b3440;border-radius:4px;pointer-events:none"></div>
 <script type="module">
 // One shared shell for every replay: the studio only hands it an id, and the payload
 // plus the .osr/.osu/song live under that replay's folder.
@@ -125,13 +128,34 @@ const state = {
 const rate = {value: 1};
 window.__rate = rate;
 const canvas = document.getElementById("chart");
-const context = canvas.getContext("2d");
+const mainContext = canvas.getContext("2d");
+// The grid, the note band and the level bands only change with the view, so they are
+// painted into an offscreen canvas and blitted each frame. Redrawing them segment by
+// segment every frame is what showed up as frame-time spikes (a bad 1% low) in play.
+let context = mainContext;
+const staticCanvas = document.createElement("canvas");
+const staticContext = staticCanvas.getContext("2d");
+let staticDirty = true;
 const scrubCanvas = document.getElementById("scrub");
 const scrubContext = scrubCanvas.getContext("2d");
+const scrubStatic = document.createElement("canvas");
+const scrubStaticContext = scrubStatic.getContext("2d");
+let scrubDirty = true;
 const readout = document.getElementById("readout");
 const playButton = document.getElementById("play");
 const followButton = document.getElementById("follow");
 let dims = {w: 1200, h: 300};
+let lastReadout = "";
+let lastReadoutAt = 0;
+// Opt-in frame timing (?stats=1): draws/s, the worst single draw, and how long the
+// offscreen timeline rebuild took. Enough to tell a slow average from a bad 1% low.
+const statsEl = document.getElementById("stats");
+const statsOn = new URLSearchParams(location.search).get("stats") === "1";
+if (statsOn) statsEl.style.display = "block";
+let statsFrames = 0;
+let statsWorst = 0;
+let statsSince = performance.now();
+let statsRebuild = 0;
 
 document.getElementById("title").textContent =
   `${meta.beatmap.artist} - ${meta.beatmap.title} [${meta.beatmap.version}]`;
@@ -249,28 +273,49 @@ function layout() {
   dims.h = canvas.clientHeight || 380;
   canvas.width = Math.round(dims.w * dpr);
   canvas.height = Math.round(dims.h * dpr);
-  context.setTransform(dpr, 0, 0, dpr, 0, 0);
+  mainContext.setTransform(dpr, 0, 0, dpr, 0, 0);
+  staticCanvas.width = Math.round(dims.w * dpr);
+  staticCanvas.height = Math.round(dims.h * dpr);
+  staticContext.setTransform(dpr, 0, 0, dpr, 0, 0);
+  staticDirty = true;
   const width = scrubCanvas.clientWidth || 1200;
   scrubCanvas.width = Math.round(width * dpr);
   scrubCanvas.height = Math.round(36 * dpr);
   scrubContext.setTransform(dpr, 0, 0, dpr, 0, 0);
+  scrubDirty = true;
 }
 
-function drawScrub() {
+function renderScrubStatic() {
   const w = scrubCanvas.clientWidth || 1200, h = 36;
-  scrubContext.clearRect(0, 0, w, h);
+  const dpr = window.devicePixelRatio || 1;
+  scrubStatic.width = Math.round(w * dpr);
+  scrubStatic.height = Math.round(h * dpr);
+  scrubStaticContext.setTransform(dpr, 0, 0, dpr, 0, 0);
+  scrubStaticContext.clearRect(0, 0, w, h);
   const buckets = new Array(Math.ceil(w)).fill(0);
   for (const time of noteTimes) {
     const bucket = Math.min(buckets.length - 1, Math.max(0, Math.floor(time / duration * w)));
     buckets[bucket] += 1;
   }
   const peak = Math.max(1, ...buckets);
-  scrubContext.fillStyle = "#22314a";
+  scrubStaticContext.fillStyle = "#22314a";
   for (let x = 0; x < buckets.length; x += 1) {
     if (!buckets[x]) continue;
     const bar = 3 + (buckets[x] / peak) * (h - 16);
-    scrubContext.fillRect(x, h - 5 - bar, 1, bar);
+    scrubStaticContext.fillRect(x, h - 5 - bar, 1, bar);
   }
+  scrubStaticContext.font = "11px ui-monospace,Consolas,monospace";
+  scrubStaticContext.fillStyle = "#8b98a5";
+  scrubStaticContext.fillText("0:00", 4, h - 21);
+  const label = clock(duration);
+  scrubStaticContext.fillText(label, w - scrubStaticContext.measureText(label).width - 4, h - 21);
+}
+
+function drawScrub() {
+  const w = scrubCanvas.clientWidth || 1200, h = 36;
+  if (scrubDirty) { renderScrubStatic(); scrubDirty = false; }
+  scrubContext.clearRect(0, 0, w, h);
+  scrubContext.drawImage(scrubStatic, 0, 0, w, h);
   const toPx = t => t / duration * w;
   scrubContext.fillStyle = "rgba(124,92,255,0.16)";
   scrubContext.fillRect(toPx(state.view.t0), 0, Math.max(2, toPx(state.view.t1) - toPx(state.view.t0)), h);
@@ -280,11 +325,6 @@ function drawScrub() {
   scrubContext.moveTo(toPx(state.t), 0);
   scrubContext.lineTo(toPx(state.t), h);
   scrubContext.stroke();
-  scrubContext.font = "11px ui-monospace,Consolas,monospace";
-  scrubContext.fillStyle = "#8b98a5";
-  scrubContext.fillText("0:00", 4, h - 21);
-  const label = clock(duration);
-  scrubContext.fillText(label, w - scrubContext.measureText(label).width - 4, h - 21);
 }
 
 function drawTimeGrid(bandList) {
@@ -617,20 +657,54 @@ function describe(time) {
   return `<b>${clock(time)}</b>   ${notesLine}\n${laneLines.join("\n")}`;
 }
 
-function draw() {
-  const list = bands();
-  context.clearRect(0, 0, dims.w, dims.h);
+function renderStatic(list) {
+  const started = statsOn ? performance.now() : 0;
+  context = staticContext;
+  staticContext.clearRect(0, 0, dims.w, dims.h);
   drawTimeGrid(list);
   drawNotesBand(list[0]);
   drawLevelBand(list[1]);
   drawLevelBand(list[2]);
+  context = mainContext;
+  if (statsOn) statsRebuild = performance.now() - started;
+}
+
+function draw() {
+  const drawStart = statsOn ? performance.now() : 0;
+  const list = bands();
+  context = mainContext;
+  context.clearRect(0, 0, dims.w, dims.h);
+  if (staticDirty) {
+    renderStatic(list);
+    staticDirty = false;
+  }
+  context.drawImage(staticCanvas, 0, 0, dims.w, dims.h);
   drawStopped(list);
   drawRulers();
   drawCrosshair();
   drawPlayhead();
   const time = state.cursor ? tOf(state.cursor.x) : state.t;
-  readout.innerHTML = describe(time);
+  const now = performance.now();
+  if (state.cursor || now - lastReadoutAt >= 100) {
+    lastReadoutAt = now;
+    const text = describe(time);
+    if (text !== lastReadout) {
+      readout.innerHTML = text;
+      lastReadout = text;
+    }
+  }
   if (typeof window.onPlayfieldTime === "function") window.onPlayfieldTime(state.t);
+  if (statsOn) {
+    statsWorst = Math.max(statsWorst, performance.now() - drawStart);
+    statsFrames += 1;
+    const now = performance.now();
+    if (now - statsSince >= 1000) {
+      statsEl.textContent = `${statsFrames} draws/s · worst ${statsWorst.toFixed(1)} ms · rebuild ${statsRebuild.toFixed(1)} ms`;
+      statsFrames = 0;
+      statsWorst = 0;
+      statsSince = now;
+    }
+  }
 }
 
 function render() {
@@ -644,6 +718,7 @@ function clampView() {
   const hash = `#t=${Math.round(state.t)}&span=${Math.round(span)}`;
   if (location.hash !== hash) history.replaceState(null, "", hash);
   state.view = {t0, t1: t0 + span};
+  staticDirty = true;
 }
 function centerOn(t) {
   const span = state.view.t1 - state.view.t0;
@@ -783,7 +858,6 @@ function togglePlay() {
   }
 }
 let last = 0;
-let lastChart = 0;
 function tick(now) {
   if (!state.playing) return;
   const audioTime = window.__audio ? window.__audio.clock() : null;
@@ -794,11 +868,8 @@ function tick(now) {
     last = now;
     state.t = Math.min(duration, state.t + delta * rate.value);
   }
-  // The playfield follows the audio clock every animation frame; the timeline only needs
-  // ~30 fps, and its full-canvas redraw would otherwise eat most of the frame budget.
-  // drawAt() ignores the follow-up call from draw() because the time has not moved.
-  if (typeof window.onPlayfieldTime === "function") window.onPlayfieldTime(state.t);
-  if (now - lastChart >= 32) { lastChart = now; follow(); render(); }
+  follow();
+  render();
   if (state.t >= duration) { togglePlay(); return; }
   requestAnimationFrame(tick);
 }
